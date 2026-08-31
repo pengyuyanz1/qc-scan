@@ -35,7 +35,6 @@ const els = {
   btnCopyCsv: $('btn-copy-csv'),
   btnCloseCsv: $('btn-close-csv'),
   btnCopyData: $('btn-copy-data'),
-  btnTorch: $('btn-torch'),
 };
 
 let scanner = null;        // html5-qrcode 实例
@@ -47,9 +46,6 @@ let toastTimer = null;
 let zoomMode = null;       // 'native'=摄像头原生变焦 | 'css'=数码放大 | null=未检测
 let zoomValue = 1;         // 当前放大倍率（作为偏好保留，扫码重启后自动恢复）
 let zoomCaps = null;       // 原生变焦能力范围 { min, max, step }
-let torchSupported = false; // 设备是否支持手电筒（暗光补光）
-let torchOn = false;       // 手电筒开关状态
-let scanHintTimer = null;  // 识别慢提示计时器
 
 /* ---------- 数据存取 ---------- */
 
@@ -178,12 +174,7 @@ async function startScan() {
       try { await scanner.stop(); } catch { /* 已停止则忽略 */ }
     }
     els.reader.innerHTML = '';
-    // 仅识别 QR 码：跳过其他条码格式的尝试，解码更快
-    const ctorConfig = { verbose: false };
-    if (typeof Html5QrcodeSupportedFormats !== 'undefined') {
-      ctorConfig.formatsToSupport = [Html5QrcodeSupportedFormats.QR_CODE];
-    }
-    scanner = new Html5Qrcode('reader', ctorConfig);
+    scanner = new Html5Qrcode('reader', { verbose: false });
     els.readerWrap.classList.remove('hidden');
     // 必须在界面显示之后再计算放大取景宽度：
     // 隐藏状态下 clientWidth 为 0，会把取景容器错误设为 0px 宽（表现为黑屏）
@@ -191,10 +182,7 @@ async function startScan() {
     await scanner.start(
       { facingMode: 'environment' },
       {
-        // 提高扫描频率：解码间隔从 100ms 缩短到约 67ms
-        fps: 15,
-        // 二维码无需镜像识别，跳过每帧的翻转重试，有效扫描频率接近翻倍
-        disableFlip: true,
+        fps: 10,
         // 扫描框保持固定大小：放大取景宽度后，解码裁剪区随之缩小，
         // 二维码在解码画布中被等效放大，识别率更高
         qrbox: (vw, vh) => {
@@ -206,7 +194,6 @@ async function startScan() {
           facingMode: 'environment',
           width: { ideal: 2560 },
           height: { ideal: 1440 },
-          frameRate: { ideal: 30 },
         },
         // 支持时使用浏览器原生 BarcodeDetector，识别性能更好
         experimentalFeatures: { useBarCodeDetectorIfSupported: true },
@@ -216,11 +203,6 @@ async function startScan() {
     scanning = true;
     autoResume = false;
     updateScanButtons();
-    // 扫码迟迟未识别时提示使用放大功能
-    clearTimeout(scanHintTimer);
-    scanHintTimer = setTimeout(() => {
-      if (scanning) toast('识别慢？点下方「放大」并对准二维码中心', 'info');
-    }, 5000);
     await initZoomSupport();
     await applyZoomOnStart();
   } catch (err) {
@@ -233,7 +215,6 @@ async function startScan() {
 async function stopScan() {
   if (!scanning) return;
   scanning = false;
-  clearTimeout(scanHintTimer);
   try { await scanner.stop(); } catch { /* 忽略停止过程中的异常 */ }
   els.readerWrap.classList.add('hidden');
   els.zoomPanel.classList.add('hidden');
@@ -257,15 +238,12 @@ function updateScanButtons() {
 async function initZoomSupport() {
   zoomMode = null;
   zoomCaps = null;
-  torchSupported = false;
-  torchOn = false;
   try {
     const caps = scanner.getRunningTrackCapabilities();
     if (caps && caps.zoom && caps.zoom.max > caps.zoom.min) {
       zoomCaps = caps.zoom;
       zoomMode = 'native';
     }
-    torchSupported = !!(caps && caps.torch);
   } catch { /* 不支持则走数码放大 */ }
   if (!zoomMode) zoomMode = 'css';
 
@@ -278,8 +256,6 @@ async function initZoomSupport() {
   els.zoomModeTip.textContent = zoomMode === 'native' ? '摄像头变焦' : '数码放大';
   els.zoomPanel.classList.remove('hidden');
   updateZoomButtonsUI();
-  els.btnTorch.classList.toggle('hidden', !torchSupported);
-  updateTorchUI();
 
   // 尝试开启连续自动对焦：近拍小码更清晰，不支持则静默忽略
   try {
@@ -304,40 +280,11 @@ function applyReaderWidth() {
 async function applyNativeZoom(value) {
   const v = Math.min(Math.max(value, zoomCaps.min), zoomCaps.max);
   try {
-    await scanner.applyVideoConstraints({ advanced: buildTrackConstraints({ zoom: v }) });
+    await scanner.applyVideoConstraints({ advanced: [{ zoom: v }] });
     return v;
   } catch {
     return null;
   }
-}
-
-/* 组合当前所有已启用的摄像头约束，避免一项设置覆盖其他项 */
-function buildTrackConstraints(extra) {
-  const advanced = [extra];
-  if (torchOn) advanced.push({ torch: true });
-  advanced.push({ focusMode: 'continuous' });
-  return { advanced };
-}
-
-async function toggleTorch() {
-  if (!scanning || !torchSupported) return;
-  const next = !torchOn;
-  const advanced = [{ torch: next }];
-  if (zoomMode === 'native' && zoomCaps && zoomValue > 1) {
-    advanced.push({ zoom: Math.min(Math.max(zoomValue, zoomCaps.min), zoomCaps.max) });
-  }
-  advanced.push({ focusMode: 'continuous' });
-  try {
-    await scanner.applyVideoConstraints({ advanced });
-    torchOn = next;
-    updateTorchUI();
-  } catch {
-    toast('手电筒切换失败', 'error');
-  }
-}
-
-function updateTorchUI() {
-  els.btnTorch.classList.toggle('active', torchOn);
 }
 
 async function setZoom(value) {
@@ -598,7 +545,6 @@ els.btnClear.addEventListener('click', clearAll);
 els.btnCopyCsv.addEventListener('click', copyCsvText);
 els.btnCloseCsv.addEventListener('click', () => els.csvModal.classList.add('hidden'));
 els.btnCopyData.addEventListener('click', openCopyModal);
-els.btnTorch.addEventListener('click', toggleTorch);
 
 // 微信/企业微信环境提示：建议用浏览器打开以获得完整功能
 if (isWeChatEnv()) {

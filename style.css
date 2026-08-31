@@ -118,12 +118,6 @@ main.container { padding-bottom: 48px; }
   background: var(--primary-light);
 }
 .zoom-mode-tip { font-size: 12px; color: var(--muted); flex-shrink: 0; }
-.torch-btn { flex: 0 0 auto; padding: 7px 10px; }
-.torch-btn.active {
-  border-color: #d97706;
-  color: #d97706;
-  background: #fffbeb;
-}
 
 .scan-actions { display: flex; gap: 10px; margin-top: 12px; }
 
