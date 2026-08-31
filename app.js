@@ -89,8 +89,10 @@ async function startScan() {
     }
     els.reader.innerHTML = '';
     scanner = new Html5Qrcode('reader', { verbose: false });
-    applyReaderWidth(); // 数码放大模式下按倍率预设取景宽度
     els.readerWrap.classList.remove('hidden');
+    // 必须在界面显示之后再计算放大取景宽度：
+    // 隐藏状态下 clientWidth 为 0，会把取景容器错误设为 0px 宽（表现为黑屏）
+    applyReaderWidth();
     await scanner.start(
       { facingMode: 'environment' },
       {
