@@ -155,7 +155,7 @@ function openCopyModal() {
   }
   els.csvText.value = recordsToCsv(records);
   els.csvModalTip.textContent = isWeChatEnv()
-    ? '微信/企业微信内无法直接下载 Excel 文件，推荐使用复制方式：复制后粘贴发送到电脑（如文件传输助手），保存为 .csv 文件即可用 Excel 打开。'
+    ? '微信内能否下载文件视设备而定（苹果手机一般可正常下载）。若「导出 Excel」没有反应，可使用此复制方式：复制后粘贴发送到电脑（如文件传输助手），保存为 .csv 文件即可用 Excel 打开。'
     : '复制后可粘贴到电脑或其他设备：粘贴到记事本另存为 .csv 文件可用 Excel 打开，也可直接粘贴到 Excel 表格中使用。';
   els.csvModal.classList.remove('hidden');
 }
@@ -487,11 +487,6 @@ function exportExcel() {
     toast('Excel 组件加载失败，请检查网络后重试', 'error');
     return;
   }
-  if (isWeChatEnv()) {
-    // 微信/企业微信内置浏览器无法直接下载文件，改用复制文本方式导出
-    openCopyModal();
-    return;
-  }
   const data = records.map((r) => ({
     '产品编号': r.code,
     '质检结果': r.result,
@@ -506,7 +501,8 @@ function exportExcel() {
   const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_` +
                 `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
   XLSX.writeFile(wb, `质检记录_${stamp}.xlsx`);
-  toast('Excel 已导出', 'success');
+  // 微信内下载是否成功视设备而定（苹果通常可以），失败时引导用「复制数据」
+  toast(isWeChatEnv() ? '已尝试下载 Excel；若未成功，请点「复制数据」' : 'Excel 已导出', 'success');
   // 建议导出后清空，释放存储空间，避免长期积累存满
   if (window.confirm('Excel 已导出。是否清空已导出的记录，以释放存储空间？')) {
     localStorage.removeItem(STORAGE_KEY);
