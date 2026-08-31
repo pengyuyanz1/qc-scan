@@ -28,6 +28,11 @@ const els = {
   btnClear: $('btn-clear'),
   toast: $('toast'),
   storageWarning: $('storage-warning'),
+  browserTip: $('browser-tip'),
+  csvModal: $('csv-modal'),
+  csvText: $('csv-text'),
+  btnCopyCsv: $('btn-copy-csv'),
+  btnCloseCsv: $('btn-close-csv'),
 };
 
 let scanner = null;        // html5-qrcode 实例
@@ -97,6 +102,47 @@ function toast(msg, type = 'info') {
   els.toast.className = `toast show ${type}`;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => els.toast.classList.remove('show'), 2200);
+}
+
+/* ---------- 微信环境检测与导出兜底 ---------- */
+
+const UA = navigator.userAgent || '';
+
+function isWeChatEnv() {
+  // 微信与企业微信的 UA 均包含 MicroMessenger
+  return /MicroMessenger/i.test(UA);
+}
+
+function csvEscape(v) {
+  const s = String(v == null ? '' : v);
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function recordsToCsv(records) {
+  const rows = [['产品编号', '质检结果', '首次扫码时间', '最近提交时间']];
+  for (const r of records) {
+    rows.push([r.code, r.result, r.scanTime, r.updateTime]);
+  }
+  // 前置 BOM，保证用 Excel 打开 csv 时中文不乱码
+  return '\uFEFF' + rows.map((row) => row.map(csvEscape).join(',')).join('\r\n');
+}
+
+function copyCsvText() {
+  const text = els.csvText.value;
+  const fallback = () => {
+    els.csvText.focus();
+    els.csvText.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
+    toast(ok ? '已复制，请粘贴发送到电脑' : '请长按文字全选后手动复制', ok ? 'success' : 'error');
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text)
+      .then(() => toast('已复制，请粘贴发送到电脑', 'success'))
+      .catch(fallback);
+  } else {
+    fallback();
+  }
 }
 
 /* ---------- 扫码 ---------- */
@@ -426,6 +472,12 @@ function exportExcel() {
     toast('Excel 组件加载失败，请检查网络后重试', 'error');
     return;
   }
+  if (isWeChatEnv()) {
+    // 微信/企业微信内置浏览器无法直接下载文件，改用复制文本方式导出
+    els.csvText.value = recordsToCsv(records);
+    els.csvModal.classList.remove('hidden');
+    return;
+  }
   const data = records.map((r) => ({
     '产品编号': r.code,
     '质检结果': r.result,
@@ -486,5 +538,12 @@ els.btnFail.addEventListener('click', () => selectResult('不合格'));
 els.btnSubmit.addEventListener('click', submit);
 els.btnExport.addEventListener('click', exportExcel);
 els.btnClear.addEventListener('click', clearAll);
+els.btnCopyCsv.addEventListener('click', copyCsvText);
+els.btnCloseCsv.addEventListener('click', () => els.csvModal.classList.add('hidden'));
+
+// 微信/企业微信环境提示：建议用浏览器打开以获得完整功能
+if (isWeChatEnv()) {
+  els.browserTip.classList.remove('hidden');
+}
 
 renderHistory();

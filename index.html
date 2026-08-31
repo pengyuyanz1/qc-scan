@@ -16,6 +16,9 @@
   </header>
 
   <main class="container">
+    <div class="browser-tip hidden" id="browser-tip">
+      检测到你在微信/企业微信中打开本页面，扫码与导出功能可能受限。建议点击右上角「···」，选择「在浏览器中打开」，再进行扫码质检。
+    </div>
     <div class="storage-warning hidden" id="storage-warning"></div>
     <!-- ① 扫码 -->
     <section class="card">
@@ -93,10 +96,25 @@
     </section>
   </main>
 
+  <div class="modal-mask hidden" id="csv-modal">
+    <div class="modal">
+      <h3>导出质检记录</h3>
+      <p class="modal-tip">
+        微信/企业微信内无法直接下载 Excel 文件。请点击「复制」，把数据粘贴发送到电脑（如微信文件传输助手），保存为 .csv 文件后即可用 Excel 打开。<br />
+        也可以在浏览器中打开本页面，直接下载 Excel 文件。
+      </p>
+      <textarea id="csv-text" readonly spellcheck="false"></textarea>
+      <div class="modal-actions">
+        <button class="btn btn-primary" id="btn-copy-csv" type="button">复制</button>
+        <button class="btn btn-ghost" id="btn-close-csv" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="app.js?v=6"></script>
+  <script src="app.js?v=7"></script>
 </body>
 </html>
