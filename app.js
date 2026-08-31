@@ -175,6 +175,29 @@ function openCopyModal() {
 
 /* ---------- 扫码 ---------- */
 
+function initZxingDecoder() {
+  if (zxingReader || typeof ZXing === 'undefined') return !!zxingReader;
+  // 使用 ZXing 核心类手动构建解码管线（不依赖 Browser* 浏览器辅助类，
+  // 核心类在所有发布版本中都稳定存在）
+  if (!(ZXing.MultiFormatReader && ZXing.RGBLuminanceSource &&
+        ZXing.BinaryBitmap && ZXing.HybridBinarizer &&
+        ZXing.BarcodeFormat && ZXing.DecodeHintType)) {
+    console.warn('ZXing 核心类缺失');
+    return false;
+  }
+  try {
+    zxingHints = new Map();
+    zxingHints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE]);
+    zxingHints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+    zxingReader = new ZXing.MultiFormatReader();
+    zxingReader.setHints(zxingHints);
+  } catch (e) {
+    console.warn('ZXing 初始化失败：', e);
+    zxingReader = null;
+  }
+  return !!zxingReader;
+}
+
 async function openCamera() {
   // 先请求高分辨率后置摄像头（多数设备会自动降级到支持的档位），
   // 失败时逐步退回最简约束，最大化兼容各类浏览器
@@ -204,23 +227,7 @@ async function startScan() {
       try { barcodeDetector = new BarcodeDetector({ formats: ['qr_code'] }); }
       catch (e) { console.warn('BarcodeDetector 初始化失败：', e); barcodeDetector = null; }
     }
-    if (!barcodeDetector && !zxingReader && typeof ZXing !== 'undefined') {
-      // 使用 ZXing 核心类手动构建解码管线（不依赖 Browser* 浏览器辅助类，
-      // 核心类在所有发布版本中都稳定存在）
-      if (ZXing.MultiFormatReader && ZXing.RGBLuminanceSource &&
-          ZXing.BinaryBitmap && ZXing.HybridBinarizer &&
-          ZXing.BarcodeFormat && ZXing.DecodeHintType) {
-        try {
-          zxingHints = new Map();
-          zxingHints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE]);
-          zxingHints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-          zxingReader = new ZXing.MultiFormatReader();
-          zxingReader.setHints(zxingHints);
-        } catch (e) { console.warn('ZXing 初始化失败：', e); zxingReader = null; }
-      } else {
-        console.warn('ZXing 核心类缺失：', Object.keys(ZXing).slice(0, 20));
-      }
-    }
+    if (!barcodeDetector && !zxingReader) initZxingDecoder();
     if (!barcodeDetector && !zxingReader) {
       toast('扫码组件加载失败，请检查网络，或改用手动输入', 'error');
       return;
@@ -337,8 +344,19 @@ async function decodeFrame() {
           text = codes[0].rawValue;
         }
       } catch (e) {
-        lastDecodeError = `原生解码:${e && e.message ? e.message : e}`;
         console.warn('BarcodeDetector 解码异常：', e);
+        // "service unavailable"：常见于无谷歌服务的安卓设备（如华为），
+        // 检测器构造成功但系统扫码服务不可用，自动切换到 ZXing 备用引擎
+        if (/unavailable/i.test(String(e && e.message))) {
+          barcodeDetector = null;
+          if (initZxingDecoder()) {
+            lastDecodeError = '';
+            toast('已切换备用解码引擎', 'info');
+            startDecodeLoop(); // 按备用引擎的节奏重启解码循环
+            return;
+          }
+        }
+        lastDecodeError = `原生解码:${e && e.message ? e.message : e}`;
       }
     } else if (zxingReader) {
       try {
