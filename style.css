@@ -90,6 +90,18 @@ main.container { padding-bottom: 48px; }
   height: auto !important;
 }
 .reader img[alt="Info icon"] { display: none; }
+.scan-frame {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 62%;
+  aspect-ratio: 1 / 1;
+  transform: translate(-50%, -50%);
+  border: 2px solid rgba(255, 255, 255, .85);
+  border-radius: 10px;
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .3);
+  pointer-events: none;
+}
 
 /* ---------- 放大控制 ---------- */
 .zoom-panel {
