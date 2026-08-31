@@ -43,7 +43,7 @@ let videoEl = null;        // 取景画面元素
 let decodeTimer = null;    // 解码循环定时器
 let decoding = false;      // 是否有一帧解码正在进行
 let barcodeDetector = null; // 浏览器原生条码检测器（安卓 Chrome 等，优先使用）
-let zxingReader = null;    // ZXing 解码器（iOS Safari 等不支持原生检测器时的后备）
+let zxingReader = null;    // ZXing MultiFormatReader（iOS 等不支持原生检测器时的后备）
 const decodeCanvas = document.createElement('canvas');
 const decodeCtx = decodeCanvas.getContext('2d', { willReadFrequently: true });
 let currentCode = null;    // 当前待提交的产品编号
@@ -176,14 +176,27 @@ async function startScan() {
     els.reader.innerHTML = '';
 
     // 初始化解码器：优先浏览器原生 BarcodeDetector（快且准），
-    // 其次 ZXing（iOS Safari 等环境不支持原生检测器）
+    // 其次 ZXing 核心解码器（iOS Safari 等环境不支持原生检测器）
     if (!barcodeDetector && 'BarcodeDetector' in window) {
       try { barcodeDetector = new BarcodeDetector({ formats: ['qr_code'] }); }
-      catch { barcodeDetector = null; }
+      catch (e) { console.warn('BarcodeDetector 初始化失败：', e); barcodeDetector = null; }
     }
     if (!barcodeDetector && !zxingReader && typeof ZXing !== 'undefined') {
-      try { zxingReader = new ZXing.BrowserQRCodeReader(); }
-      catch { zxingReader = null; }
+      // 使用 ZXing 核心类手动构建解码管线（不依赖 Browser* 浏览器辅助类，
+      // 核心类在所有发布版本中都稳定存在）
+      if (ZXing.MultiFormatReader && ZXing.RGBLuminanceSource &&
+          ZXing.BinaryBitmap && ZXing.HybridBinarizer &&
+          ZXing.BarcodeFormat && ZXing.DecodeHintType) {
+        try {
+          const hints = new Map();
+          hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE]);
+          hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+          zxingReader = new ZXing.MultiFormatReader();
+          zxingReader.setHints(hints);
+        } catch (e) { console.warn('ZXing 初始化失败：', e); zxingReader = null; }
+      } else {
+        console.warn('ZXing 核心类缺失：', Object.keys(ZXing).slice(0, 20));
+      }
     }
     if (!barcodeDetector && !zxingReader) {
       toast('扫码组件加载失败，请检查网络，或改用手动输入', 'error');
@@ -193,7 +206,7 @@ async function startScan() {
     // 创建取景画面与视觉引导框
     videoEl = document.createElement('video');
     videoEl.setAttribute('playsinline', '');
-    videoEl.setAttribute('muted', '');
+    videoEl.muted = true; // iOS 要求：静音状态才允许自动播放
     videoEl.autoplay = true;
     els.reader.appendChild(videoEl);
     const frame = document.createElement('div');
@@ -291,15 +304,28 @@ async function decodeFrame() {
 
     let text = null;
     if (barcodeDetector) {
-      const codes = await barcodeDetector.detect(decodeCanvas);
-      if (codes && codes.length > 0 && codes[0].rawValue) {
-        text = codes[0].rawValue;
-      }
+      try {
+        const codes = await barcodeDetector.detect(decodeCanvas);
+        if (codes && codes.length > 0 && codes[0].rawValue) {
+          text = codes[0].rawValue;
+        }
+      } catch (e) { console.warn('BarcodeDetector 解码异常：', e); }
     } else if (zxingReader) {
       try {
-        const result = zxingReader.decodeFromCanvas(decodeCanvas);
+        // 手动构建解码管线：RGBA 像素 → 灰度 → 二值化 → 解码
+        const imageData = decodeCtx.getImageData(0, 0, decodeCanvas.width, decodeCanvas.height);
+        const pixels = new Int32Array(imageData.data.buffer);
+        const source = new ZXing.RGBLuminanceSource(pixels, decodeCanvas.width, decodeCanvas.height);
+        const bitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(source));
+        zxingReader.reset();
+        const result = zxingReader.decode(bitmap);
         if (result) text = result.getText();
-      } catch (e) { /* 本帧未识别到二维码：正常情况，继续下一帧 */ }
+      } catch (e) {
+        // NotFoundException 为正常的"本帧无码"；其他异常打印出来便于排查
+        if (!(e instanceof ZXing.NotFoundException)) {
+          console.warn('ZXing 解码异常：', e);
+        }
+      }
     }
 
     if (text) await onDecoded(text);
