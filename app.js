@@ -503,12 +503,6 @@ function exportExcel() {
   XLSX.writeFile(wb, `质检记录_${stamp}.xlsx`);
   // 微信内下载是否成功视设备而定（苹果通常可以），失败时引导用「复制数据」
   toast(isWeChatEnv() ? '已尝试下载 Excel；若未成功，请点「复制数据」' : 'Excel 已导出', 'success');
-  // 建议导出后清空，释放存储空间，避免长期积累存满
-  if (window.confirm('Excel 已导出。是否清空已导出的记录，以释放存储空间？')) {
-    localStorage.removeItem(STORAGE_KEY);
-    renderHistory();
-    toast('已清空记录，可继续扫码');
-  }
 }
 
 /* ---------- 手动输入 ---------- */
