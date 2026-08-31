@@ -90,37 +90,6 @@ main.container { padding-bottom: 48px; }
   height: auto !important;
 }
 .reader img[alt="Info icon"] { display: none; }
-.scan-frame {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 62%;
-  aspect-ratio: 1 / 1;
-  transform: translate(-50%, -50%);
-  border: 2px solid rgba(255, 255, 255, .85);
-  border-radius: 10px;
-  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, .3);
-  pointer-events: none;
-}
-
-/* ---------- 调试信息条 ---------- */
-.debug-bar {
-  margin-top: 8px;
-  padding: 6px 10px;
-  border-radius: 8px;
-  background: #f8fafc;
-  border: 1px dashed var(--border);
-  color: var(--muted);
-  font-size: 11px;
-  font-family: ui-monospace, Consolas, monospace;
-  line-height: 1.5;
-  word-break: break-all;
-}
-.debug-bar.has-error {
-  background: #fef2f2;
-  border-color: #fecaca;
-  color: #b91c1c;
-}
 
 /* ---------- 放大控制 ---------- */
 .zoom-panel {

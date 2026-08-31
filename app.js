@@ -35,23 +35,10 @@ const els = {
   btnCopyCsv: $('btn-copy-csv'),
   btnCloseCsv: $('btn-close-csv'),
   btnCopyData: $('btn-copy-data'),
-  debugBar: $('debug-bar'),
 };
 
+let scanner = null;        // html5-qrcode 实例
 let scanning = false;      // 摄像头是否运行中
-let mediaStream = null;    // 摄像头视频流
-let videoEl = null;        // 取景画面元素
-let decodeTimer = null;    // 解码循环定时器
-let decoding = false;      // 是否有一帧解码正在进行
-let barcodeDetector = null; // 浏览器原生条码检测器（安卓 Chrome 等，优先使用）
-let zxingReader = null;    // ZXing MultiFormatReader（iOS 等不支持原生检测器时的后备）
-let zxingHints = null;     // ZXing 解码提示（每帧解码时需传入）
-const decodeCanvas = document.createElement('canvas');
-const decodeCtx = decodeCanvas.getContext('2d', { willReadFrequently: true });
-let decodeCount = 0;       // 解码帧计数（用于统计帧率）
-let decodeFps = 0;         // 每秒完成的解码帧数
-let lastDecodeError = '';  // 最近一次解码异常（显示在调试条上）
-let debugTimer = null;     // 调试信息刷新定时器
 let currentCode = null;    // 当前待提交的产品编号
 let selectedResult = null; // '合格' | '不合格'
 let autoResume = false;    // 提交后是否自动继续扫码
@@ -175,218 +162,70 @@ function openCopyModal() {
 
 /* ---------- 扫码 ---------- */
 
-function initZxingDecoder() {
-  if (zxingReader || typeof ZXing === 'undefined') return !!zxingReader;
-  // 使用 ZXing 核心类手动构建解码管线（不依赖 Browser* 浏览器辅助类，
-  // 核心类在所有发布版本中都稳定存在）
-  if (!(ZXing.MultiFormatReader && ZXing.RGBLuminanceSource &&
-        ZXing.BinaryBitmap && ZXing.HybridBinarizer &&
-        ZXing.BarcodeFormat && ZXing.DecodeHintType)) {
-    console.warn('ZXing 核心类缺失');
-    return false;
-  }
-  try {
-    zxingHints = new Map();
-    zxingHints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE]);
-    zxingHints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-    zxingReader = new ZXing.MultiFormatReader();
-    zxingReader.setHints(zxingHints);
-  } catch (e) {
-    console.warn('ZXing 初始化失败：', e);
-    zxingReader = null;
-  }
-  return !!zxingReader;
-}
-
-async function openCamera() {
-  // 先请求高分辨率后置摄像头（多数设备会自动降级到支持的档位），
-  // 失败时逐步退回最简约束，最大化兼容各类浏览器
-  const attempts = [
-    { audio: false, video: { facingMode: 'environment', width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30 } } },
-    { audio: false, video: { facingMode: 'environment' } },
-    { audio: false, video: true },
-  ];
-  let lastErr = null;
-  for (const constraints of attempts) {
-    try {
-      return await navigator.mediaDevices.getUserMedia(constraints);
-    } catch (e) { lastErr = e; }
-  }
-  throw lastErr;
-}
-
 async function startScan() {
   if (scanning) return;
+  if (typeof Html5Qrcode === 'undefined') {
+    toast('扫码组件加载失败，请检查网络，或改用手动输入', 'error');
+    return;
+  }
   try {
-    await stopCamera(); // 清理可能残留的旧摄像头资源
+    // 每次都用全新实例启动：规避复用旧实例在部分设备上重启后黑屏的问题
+    if (scanner) {
+      try { await scanner.stop(); } catch { /* 已停止则忽略 */ }
+    }
     els.reader.innerHTML = '';
-
-    // 初始化解码器：优先浏览器原生 BarcodeDetector（快且准），
-    // 其次 ZXing 核心解码器（iOS Safari 等环境不支持原生检测器）
-    if (!barcodeDetector && 'BarcodeDetector' in window) {
-      try { barcodeDetector = new BarcodeDetector({ formats: ['qr_code'] }); }
-      catch (e) { console.warn('BarcodeDetector 初始化失败：', e); barcodeDetector = null; }
-    }
-    if (!barcodeDetector && !zxingReader) initZxingDecoder();
-    if (!barcodeDetector && !zxingReader) {
-      toast('扫码组件加载失败，请检查网络，或改用手动输入', 'error');
-      return;
-    }
-
-    // 创建取景画面与视觉引导框
-    videoEl = document.createElement('video');
-    videoEl.setAttribute('playsinline', '');
-    videoEl.muted = true; // iOS 要求：静音状态才允许自动播放
-    videoEl.autoplay = true;
-    els.reader.appendChild(videoEl);
-    const frame = document.createElement('div');
-    frame.className = 'scan-frame';
-    els.reader.appendChild(frame);
-
+    scanner = new Html5Qrcode('reader', { verbose: false });
     els.readerWrap.classList.remove('hidden');
-    applyReaderWidth(); // 数码放大偏好（纯视觉缩放，不影响解码）
-
-    mediaStream = await openCamera();
-    videoEl.srcObject = mediaStream;
-    await videoEl.play();
-    if (!videoEl.videoWidth) {
-      await new Promise((res) => videoEl.addEventListener('loadedmetadata', res, { once: true }));
-    }
-
+    // 必须在界面显示之后再计算放大取景宽度：
+    // 隐藏状态下 clientWidth 为 0，会把取景容器错误设为 0px 宽（表现为黑屏）
+    applyReaderWidth();
+    await scanner.start(
+      { facingMode: 'environment' },
+      {
+        fps: 10,
+        // 扫描框保持固定大小：放大取景宽度后，解码裁剪区随之缩小，
+        // 二维码在解码画布中被等效放大，识别率更高
+        qrbox: (vw, vh) => {
+          const size = Math.max(Math.min(200, Math.min(vw, vh) - 40), 90);
+          return { width: size, height: size };
+        },
+        // 请求高分辨率视频流：小二维码在画面中的像素更多，识别更准
+        videoConstraints: {
+          facingMode: 'environment',
+          width: { ideal: 2560 },
+          height: { ideal: 1440 },
+        },
+        // 支持时使用浏览器原生 BarcodeDetector，识别性能更好
+        experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+      },
+      onScanSuccess
+    );
     scanning = true;
     autoResume = false;
     updateScanButtons();
     await initZoomSupport();
     await applyZoomOnStart();
-    startDecodeLoop();
   } catch (err) {
-    await stopCamera();
     els.readerWrap.classList.add('hidden');
     const reason = err && err.message ? err.message : '未知错误';
     toast(`无法启动摄像头（${reason}），可改用手动输入`, 'error');
   }
 }
 
-async function stopCamera() {
-  stopDecodeLoop();
-  if (mediaStream) {
-    try {
-      mediaStream.getTracks().forEach((t) => t.stop());
-    } catch { /* 忽略 */ }
-    mediaStream = null;
-  }
-  videoEl = null;
-}
-
 async function stopScan() {
   if (!scanning) return;
   scanning = false;
-  await stopCamera();
-  els.reader.innerHTML = '';
+  try { await scanner.stop(); } catch { /* 忽略停止过程中的异常 */ }
   els.readerWrap.classList.add('hidden');
   els.zoomPanel.classList.add('hidden');
   updateScanButtons();
 }
 
-async function onDecoded(text) {
+async function onScanSuccess(decodedText) {
   if (!scanning) return;
   await stopScan();
   autoResume = true; // 提交后自动继续扫码，无需再点一次
-  useCode(String(text).trim());
-}
-
-function startDecodeLoop() {
-  stopDecodeLoop();
-  decodeCount = 0;
-  decodeFps = 0;
-  lastDecodeError = '';
-  els.debugBar.classList.remove('hidden');
-  updateDebugBar();
-  // 原生检测器性能好，间隔短；ZXing 为纯 JS 解码，间隔放长
-  decodeTimer = setInterval(decodeFrame, barcodeDetector ? 160 : 350);
-  debugTimer = setInterval(() => {
-    decodeFps = decodeCount;
-    decodeCount = 0;
-    updateDebugBar();
-  }, 1000);
-}
-
-function stopDecodeLoop() {
-  if (decodeTimer) { clearInterval(decodeTimer); decodeTimer = null; }
-  if (debugTimer) { clearInterval(debugTimer); debugTimer = null; }
-  els.debugBar.classList.add('hidden');
-}
-
-function updateDebugBar() {
-  const engine = barcodeDetector ? '原生' : (zxingReader ? 'ZXing' : '无');
-  const size = videoEl && videoEl.videoWidth
-    ? `${videoEl.videoWidth}×${videoEl.videoHeight}`
-    : '无画面';
-  els.debugBar.textContent = `调试 引擎:${engine} | 画面:${size} | 解码:${decodeFps}帧/秒` +
-    (lastDecodeError ? ` | 异常:${lastDecodeError}` : '');
-  els.debugBar.classList.toggle('has-error', !!lastDecodeError);
-}
-
-async function decodeFrame() {
-  if (!scanning || decoding || !videoEl || videoEl.readyState < 2) return;
-  decoding = true;
-  try {
-    const vw = videoEl.videoWidth;
-    const vh = videoEl.videoHeight;
-    if (!vw || !vh) return;
-
-    let text = null;
-    if (barcodeDetector) {
-      // 原生检测器直接分析视频当前帧（全画面，微信同款思路）
-      try {
-        const codes = await barcodeDetector.detect(videoEl);
-        if (codes && codes.length > 0 && codes[0].rawValue) {
-          text = codes[0].rawValue;
-        }
-      } catch (e) {
-        console.warn('BarcodeDetector 解码异常：', e);
-        // "service unavailable"：常见于无谷歌服务的安卓设备（如华为），
-        // 检测器构造成功但系统扫码服务不可用，自动切换到 ZXing 备用引擎
-        if (/unavailable/i.test(String(e && e.message))) {
-          barcodeDetector = null;
-          if (initZxingDecoder()) {
-            lastDecodeError = '';
-            toast('已切换备用解码引擎', 'info');
-            startDecodeLoop(); // 按备用引擎的节奏重启解码循环
-            return;
-          }
-        }
-        lastDecodeError = `原生解码:${e && e.message ? e.message : e}`;
-      }
-    } else if (zxingReader) {
-      try {
-        // 手动构建解码管线：视频帧 → RGBA 像素 → 灰度 → 二值化 → 解码
-        const maxW = 1280;
-        const scale = Math.min(1, maxW / vw);
-        decodeCanvas.width = Math.round(vw * scale);
-        decodeCanvas.height = Math.round(vh * scale);
-        decodeCtx.drawImage(videoEl, 0, 0, decodeCanvas.width, decodeCanvas.height);
-        const imageData = decodeCtx.getImageData(0, 0, decodeCanvas.width, decodeCanvas.height);
-        const pixels = new Int32Array(imageData.data.buffer);
-        const source = new ZXing.RGBLuminanceSource(pixels, decodeCanvas.width, decodeCanvas.height);
-        const bitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(source));
-        zxingReader.reset();
-        const result = zxingReader.decode(bitmap, zxingHints);
-        if (result) text = result.getText();
-      } catch (e) {
-        const isNotFound = (ZXing.NotFoundException && e instanceof ZXing.NotFoundException) ||
-                           (e && e.name === 'NotFoundException');
-        if (!isNotFound) {
-          lastDecodeError = `ZXing:${e && e.message ? e.message : e}`;
-          console.warn('ZXing 解码异常：', e);
-        }
-      }
-    }
-
-    decodeCount++;
-    if (text) await onDecoded(text);
-  } catch { /* 单帧解码异常忽略 */ }
-  finally { decoding = false; }
+  useCode(String(decodedText).trim());
 }
 
 function updateScanButtons() {
@@ -399,22 +238,19 @@ function updateScanButtons() {
 async function initZoomSupport() {
   zoomMode = null;
   zoomCaps = null;
-  const track = mediaStream ? mediaStream.getVideoTracks()[0] : null;
-
-  if (track && typeof track.getCapabilities === 'function') {
-    try {
-      const caps = track.getCapabilities();
-      if (caps && caps.zoom && caps.zoom.max > caps.zoom.min) {
-        zoomCaps = caps.zoom;
-        zoomMode = 'native';
-      }
-    } catch { /* 忽略 */ }
-  }
+  try {
+    const caps = scanner.getRunningTrackCapabilities();
+    if (caps && caps.zoom && caps.zoom.max > caps.zoom.min) {
+      zoomCaps = caps.zoom;
+      zoomMode = 'native';
+    }
+  } catch { /* 不支持则走数码放大 */ }
   if (!zoomMode) zoomMode = 'css';
 
   // 按视频流实际宽高比固定取景框高度，放大时画面居中裁剪
-  if (videoEl && videoEl.videoWidth && videoEl.videoHeight) {
-    els.readerWrap.style.aspectRatio = `${videoEl.videoWidth} / ${videoEl.videoHeight}`;
+  const video = els.reader.querySelector('video');
+  if (video && video.videoWidth && video.videoHeight) {
+    els.readerWrap.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
   }
 
   els.zoomModeTip.textContent = zoomMode === 'native' ? '摄像头变焦' : '数码放大';
@@ -422,11 +258,9 @@ async function initZoomSupport() {
   updateZoomButtonsUI();
 
   // 尝试开启连续自动对焦：近拍小码更清晰，不支持则静默忽略
-  if (track && typeof track.applyConstraints === 'function') {
-    try {
-      await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
-    } catch { /* 忽略 */ }
-  }
+  try {
+    await scanner.applyVideoConstraints({ advanced: [{ focusMode: 'continuous' }] });
+  } catch { /* 忽略 */ }
 }
 
 async function applyZoomOnStart() {
@@ -435,8 +269,8 @@ async function applyZoomOnStart() {
 }
 
 function applyReaderWidth() {
-  // 数码放大：把取景容器宽度撑大，超出部分被居中裁剪。
-  // 纯视觉缩放，解码始终基于完整原始画面，不受此影响
+  // 数码放大：把取景容器宽度撑大，超出部分被居中裁剪，
+  // 视频画面与解码裁剪区同步放大，解码画布保持高分辨率
   const factor = zoomMode === 'css' && zoomValue > 1 ? zoomValue : 1;
   els.reader.style.width = factor > 1
     ? `${Math.round(els.readerWrap.clientWidth * factor)}px`
@@ -444,15 +278,9 @@ function applyReaderWidth() {
 }
 
 async function applyNativeZoom(value) {
-  const track = mediaStream ? mediaStream.getVideoTracks()[0] : null;
-  if (!track) return null;
   const v = Math.min(Math.max(value, zoomCaps.min), zoomCaps.max);
   try {
-    // 注意：变焦请求会整体替换摄像头约束，必须把连续自动对焦一并带上，
-    // 否则变焦后对焦失效，画面模糊、对不上焦
-    await track.applyConstraints({
-      advanced: [{ zoom: v }, { focusMode: 'continuous' }],
-    });
+    await scanner.applyVideoConstraints({ advanced: [{ zoom: v }] });
     return v;
   } catch {
     return null;
@@ -472,12 +300,18 @@ async function setZoom(value) {
       toast(`该摄像头最大支持 ${applied}×`);
     }
   } else {
-    // 数码放大为纯视觉缩放：解码始终基于完整原始画面，切换即时生效，无需重启
+    // 数码放大：放大取景宽度后重启扫码，扫描框重新居中，
+    // 解码画布保持高分辨率，小二维码识别更灵敏
     applyReaderWidth();
-    if (value > 1) {
-      toast(`已放大 ${value}×：保持 10~20 厘米距离，模糊时降低倍数`, 'info');
-    }
+    await restartScan();
   }
+}
+
+async function restartScan() {
+  if (!scanning) return;
+  scanning = false;
+  try { await scanner.stop(); } catch { /* 忽略 */ }
+  await startScan();
 }
 
 function updateZoomButtonsUI() {

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#4f46e5" />
   <title>QC 扫码质检</title>
-  <link rel="stylesheet" href="style.css?v=15" />
+  <link rel="stylesheet" href="style.css?v=9" />
 </head>
 <body>
   <header class="app-header">
@@ -29,7 +29,6 @@
       <div class="reader-wrap hidden" id="reader-wrap">
         <div id="reader" class="reader"></div>
       </div>
-      <div class="debug-bar hidden" id="debug-bar"></div>
       <div class="zoom-panel hidden" id="zoom-panel">
         <span class="zoom-label">放大</span>
         <div class="zoom-btns" id="zoom-btns">
@@ -112,8 +111,8 @@
 
   <div class="toast" id="toast"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="app.js?v=16"></script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>
