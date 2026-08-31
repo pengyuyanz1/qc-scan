@@ -35,6 +35,7 @@ const els = {
   btnCopyCsv: $('btn-copy-csv'),
   btnCloseCsv: $('btn-close-csv'),
   btnCopyData: $('btn-copy-data'),
+  debugBar: $('debug-bar'),
 };
 
 let scanning = false;      // 摄像头是否运行中
@@ -44,8 +45,13 @@ let decodeTimer = null;    // 解码循环定时器
 let decoding = false;      // 是否有一帧解码正在进行
 let barcodeDetector = null; // 浏览器原生条码检测器（安卓 Chrome 等，优先使用）
 let zxingReader = null;    // ZXing MultiFormatReader（iOS 等不支持原生检测器时的后备）
+let zxingHints = null;     // ZXing 解码提示（每帧解码时需传入）
 const decodeCanvas = document.createElement('canvas');
 const decodeCtx = decodeCanvas.getContext('2d', { willReadFrequently: true });
+let decodeCount = 0;       // 解码帧计数（用于统计帧率）
+let decodeFps = 0;         // 每秒完成的解码帧数
+let lastDecodeError = '';  // 最近一次解码异常（显示在调试条上）
+let debugTimer = null;     // 调试信息刷新定时器
 let currentCode = null;    // 当前待提交的产品编号
 let selectedResult = null; // '合格' | '不合格'
 let autoResume = false;    // 提交后是否自动继续扫码
@@ -169,6 +175,23 @@ function openCopyModal() {
 
 /* ---------- 扫码 ---------- */
 
+async function openCamera() {
+  // 先请求高分辨率后置摄像头（多数设备会自动降级到支持的档位），
+  // 失败时逐步退回最简约束，最大化兼容各类浏览器
+  const attempts = [
+    { audio: false, video: { facingMode: 'environment', width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30 } } },
+    { audio: false, video: { facingMode: 'environment' } },
+    { audio: false, video: true },
+  ];
+  let lastErr = null;
+  for (const constraints of attempts) {
+    try {
+      return await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
+}
+
 async function startScan() {
   if (scanning) return;
   try {
@@ -188,11 +211,11 @@ async function startScan() {
           ZXing.BinaryBitmap && ZXing.HybridBinarizer &&
           ZXing.BarcodeFormat && ZXing.DecodeHintType) {
         try {
-          const hints = new Map();
-          hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE]);
-          hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+          zxingHints = new Map();
+          zxingHints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE]);
+          zxingHints.set(ZXing.DecodeHintType.TRY_HARDER, true);
           zxingReader = new ZXing.MultiFormatReader();
-          zxingReader.setHints(hints);
+          zxingReader.setHints(zxingHints);
         } catch (e) { console.warn('ZXing 初始化失败：', e); zxingReader = null; }
       } else {
         console.warn('ZXing 核心类缺失：', Object.keys(ZXing).slice(0, 20));
@@ -216,15 +239,7 @@ async function startScan() {
     els.readerWrap.classList.remove('hidden');
     applyReaderWidth(); // 数码放大偏好（纯视觉缩放，不影响解码）
 
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        facingMode: 'environment',
-        width: { ideal: 3840 },
-        height: { ideal: 2160 },
-        frameRate: { ideal: 30 },
-      },
-    });
+    mediaStream = await openCamera();
     videoEl.srcObject = mediaStream;
     await videoEl.play();
     if (!videoEl.videoWidth) {
@@ -275,15 +290,34 @@ async function onDecoded(text) {
 
 function startDecodeLoop() {
   stopDecodeLoop();
+  decodeCount = 0;
+  decodeFps = 0;
+  lastDecodeError = '';
+  els.debugBar.classList.remove('hidden');
+  updateDebugBar();
   // 原生检测器性能好，间隔短；ZXing 为纯 JS 解码，间隔放长
   decodeTimer = setInterval(decodeFrame, barcodeDetector ? 160 : 350);
+  debugTimer = setInterval(() => {
+    decodeFps = decodeCount;
+    decodeCount = 0;
+    updateDebugBar();
+  }, 1000);
 }
 
 function stopDecodeLoop() {
-  if (decodeTimer) {
-    clearInterval(decodeTimer);
-    decodeTimer = null;
-  }
+  if (decodeTimer) { clearInterval(decodeTimer); decodeTimer = null; }
+  if (debugTimer) { clearInterval(debugTimer); debugTimer = null; }
+  els.debugBar.classList.add('hidden');
+}
+
+function updateDebugBar() {
+  const engine = barcodeDetector ? '原生' : (zxingReader ? 'ZXing' : '无');
+  const size = videoEl && videoEl.videoWidth
+    ? `${videoEl.videoWidth}×${videoEl.videoHeight}`
+    : '无画面';
+  els.debugBar.textContent = `调试 引擎:${engine} | 画面:${size} | 解码:${decodeFps}帧/秒` +
+    (lastDecodeError ? ` | 异常:${lastDecodeError}` : '');
+  els.debugBar.classList.toggle('has-error', !!lastDecodeError);
 }
 
 async function decodeFrame() {
@@ -293,41 +327,45 @@ async function decodeFrame() {
     const vw = videoEl.videoWidth;
     const vh = videoEl.videoHeight;
     if (!vw || !vh) return;
-    // 全画面解码（与微信扫一扫同思路）：二维码出现在画面任意位置都能识别，
-    // 解码基于原始视频帧而非屏幕显示大小，小占比的码也有足够像素；
-    // 解码画布限制最大宽度以平衡速度与识别率
-    const maxW = barcodeDetector ? 1920 : 1280;
-    const scale = Math.min(1, maxW / vw);
-    decodeCanvas.width = Math.round(vw * scale);
-    decodeCanvas.height = Math.round(vh * scale);
-    decodeCtx.drawImage(videoEl, 0, 0, decodeCanvas.width, decodeCanvas.height);
 
     let text = null;
     if (barcodeDetector) {
+      // 原生检测器直接分析视频当前帧（全画面，微信同款思路）
       try {
-        const codes = await barcodeDetector.detect(decodeCanvas);
+        const codes = await barcodeDetector.detect(videoEl);
         if (codes && codes.length > 0 && codes[0].rawValue) {
           text = codes[0].rawValue;
         }
-      } catch (e) { console.warn('BarcodeDetector 解码异常：', e); }
+      } catch (e) {
+        lastDecodeError = `原生解码:${e && e.message ? e.message : e}`;
+        console.warn('BarcodeDetector 解码异常：', e);
+      }
     } else if (zxingReader) {
       try {
-        // 手动构建解码管线：RGBA 像素 → 灰度 → 二值化 → 解码
+        // 手动构建解码管线：视频帧 → RGBA 像素 → 灰度 → 二值化 → 解码
+        const maxW = 1280;
+        const scale = Math.min(1, maxW / vw);
+        decodeCanvas.width = Math.round(vw * scale);
+        decodeCanvas.height = Math.round(vh * scale);
+        decodeCtx.drawImage(videoEl, 0, 0, decodeCanvas.width, decodeCanvas.height);
         const imageData = decodeCtx.getImageData(0, 0, decodeCanvas.width, decodeCanvas.height);
         const pixels = new Int32Array(imageData.data.buffer);
         const source = new ZXing.RGBLuminanceSource(pixels, decodeCanvas.width, decodeCanvas.height);
         const bitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(source));
         zxingReader.reset();
-        const result = zxingReader.decode(bitmap);
+        const result = zxingReader.decode(bitmap, zxingHints);
         if (result) text = result.getText();
       } catch (e) {
-        // NotFoundException 为正常的"本帧无码"；其他异常打印出来便于排查
-        if (!(e instanceof ZXing.NotFoundException)) {
+        const isNotFound = (ZXing.NotFoundException && e instanceof ZXing.NotFoundException) ||
+                           (e && e.name === 'NotFoundException');
+        if (!isNotFound) {
+          lastDecodeError = `ZXing:${e && e.message ? e.message : e}`;
           console.warn('ZXing 解码异常：', e);
         }
       }
     }
 
+    decodeCount++;
     if (text) await onDecoded(text);
   } catch { /* 单帧解码异常忽略 */ }
   finally { decoding = false; }
