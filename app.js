@@ -84,17 +84,16 @@ async function startScan() {
   }
   try {
     if (!scanner) scanner = new Html5Qrcode('reader', { verbose: false });
+    applyReaderWidth(); // 数码放大模式下按倍率预设取景宽度
     els.readerWrap.classList.remove('hidden');
-    els.reader.style.transform = ''; // 先复位，启动成功后按倍率重新应用
     await scanner.start(
       { facingMode: 'environment' },
       {
         fps: 10,
-        // 扫描框：数码放大时按倍率缩小裁剪区，等效放大解码图像，利于识别小二维码
+        // 扫描框保持固定大小：放大取景宽度后，解码裁剪区随之缩小，
+        // 二维码在解码画布中被等效放大，识别率更高
         qrbox: (vw, vh) => {
-          const base = Math.round(Math.min(Math.min(vw, vh) * 0.62, 220));
-          const factor = zoomMode === 'css' && zoomValue > 1 ? zoomValue : 1;
-          const size = Math.max(Math.round(base / factor), 80);
+          const size = Math.max(Math.min(200, Math.min(vw, vh) - 40), 90);
           return { width: size, height: size };
         },
         // 请求高分辨率视频流：小二维码在画面中的像素更多，识别更准
@@ -128,7 +127,6 @@ async function stopScan() {
     scanner.clear();
   } catch { /* 忽略停止过程中的异常 */ }
   els.readerWrap.classList.add('hidden');
-  els.reader.style.transform = '';
   els.zoomPanel.classList.add('hidden');
   updateScanButtons();
 }
@@ -159,6 +157,12 @@ async function initZoomSupport() {
   } catch { /* 不支持则走数码放大 */ }
   if (!zoomMode) zoomMode = 'css';
 
+  // 按视频流实际宽高比固定取景框高度，放大时画面居中裁剪
+  const video = els.reader.querySelector('video');
+  if (video && video.videoWidth && video.videoHeight) {
+    els.readerWrap.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+  }
+
   els.zoomModeTip.textContent = zoomMode === 'native' ? '摄像头变焦' : '数码放大';
   els.zoomPanel.classList.remove('hidden');
   updateZoomButtonsUI();
@@ -170,12 +174,17 @@ async function initZoomSupport() {
 }
 
 async function applyZoomOnStart() {
-  if (zoomValue <= 1) return;
-  if (zoomMode === 'native') {
-    await applyNativeZoom(zoomValue);
-  } else {
-    els.reader.style.transform = `scale(${zoomValue})`;
-  }
+  if (zoomValue <= 1 || zoomMode !== 'native') return;
+  await applyNativeZoom(zoomValue);
+}
+
+function applyReaderWidth() {
+  // 数码放大：把取景容器宽度撑大，超出部分被居中裁剪，
+  // 视频画面与解码裁剪区同步放大，解码画布保持高分辨率
+  const factor = zoomMode === 'css' && zoomValue > 1 ? zoomValue : 1;
+  els.reader.style.width = factor > 1
+    ? `${Math.round(els.readerWrap.clientWidth * factor)}px`
+    : '';
 }
 
 async function applyNativeZoom(value) {
@@ -201,8 +210,9 @@ async function setZoom(value) {
       toast(`该摄像头最大支持 ${applied}×`);
     }
   } else {
-    // 数码放大：先放大显示，再重启扫码使扫描框（解码裁剪区）同步缩小
-    els.reader.style.transform = value > 1 ? `scale(${value})` : '';
+    // 数码放大：放大取景宽度后重启扫码，扫描框重新居中，
+    // 解码画布保持高分辨率，小二维码识别更灵敏
+    applyReaderWidth();
     await restartScan();
   }
 }
