@@ -145,6 +145,81 @@ function updateScanButtons() {
   els.btnStop.classList.toggle('hidden', !scanning);
 }
 
+/* ---------- 放大功能（小二维码增强） ---------- */
+
+async function initZoomSupport() {
+  zoomMode = null;
+  zoomCaps = null;
+  try {
+    const caps = scanner.getRunningTrackCapabilities();
+    if (caps && caps.zoom && caps.zoom.max > caps.zoom.min) {
+      zoomCaps = caps.zoom;
+      zoomMode = 'native';
+    }
+  } catch { /* 不支持则走数码放大 */ }
+  if (!zoomMode) zoomMode = 'css';
+
+  els.zoomModeTip.textContent = zoomMode === 'native' ? '摄像头变焦' : '数码放大';
+  els.zoomPanel.classList.remove('hidden');
+  updateZoomButtonsUI();
+
+  // 尝试开启连续自动对焦：近拍小码更清晰，不支持则静默忽略
+  try {
+    await scanner.applyVideoConstraints({ advanced: [{ focusMode: 'continuous' }] });
+  } catch { /* 忽略 */ }
+}
+
+async function applyZoomOnStart() {
+  if (zoomValue <= 1) return;
+  if (zoomMode === 'native') {
+    await applyNativeZoom(zoomValue);
+  } else {
+    els.reader.style.transform = `scale(${zoomValue})`;
+  }
+}
+
+async function applyNativeZoom(value) {
+  const v = Math.min(Math.max(value, zoomCaps.min), zoomCaps.max);
+  try {
+    await scanner.applyVideoConstraints({ advanced: [{ zoom: v }] });
+    return v;
+  } catch {
+    return null;
+  }
+}
+
+async function setZoom(value) {
+  if (value === zoomValue) return;
+  zoomValue = value;
+  updateZoomButtonsUI();
+  if (!scanning) return; // 未在扫码时仅记住偏好，下次启动时生效
+  if (zoomMode === 'native') {
+    const applied = await applyNativeZoom(value);
+    if (applied == null) {
+      toast('变焦失败，该设备可能不支持', 'error');
+    } else if (applied !== value) {
+      toast(`该摄像头最大支持 ${applied}×`);
+    }
+  } else {
+    // 数码放大：先放大显示，再重启扫码使扫描框（解码裁剪区）同步缩小
+    els.reader.style.transform = value > 1 ? `scale(${value})` : '';
+    await restartScan();
+  }
+}
+
+async function restartScan() {
+  if (!scanning) return;
+  scanning = false;
+  try { await scanner.stop(); } catch { /* 忽略 */ }
+  await startScan();
+}
+
+function updateZoomButtonsUI() {
+  document.querySelectorAll('#zoom-btns .zoom-btn').forEach((btn) => {
+    btn.classList.toggle('active', Number(btn.dataset.zoom) === zoomValue);
+  });
+}
+
 /* ---------- 判定与提交 ---------- */
 
 function useCode(code) {
@@ -347,6 +422,9 @@ els.manualForm.addEventListener('submit', (e) => {
 /* ---------- 事件绑定与初始化 ---------- */
 
 els.btnStart.addEventListener('click', startScan);
+document.querySelectorAll('#zoom-btns .zoom-btn').forEach((btn) => {
+  btn.addEventListener('click', () => setZoom(Number(btn.dataset.zoom)));
+});
 els.btnStop.addEventListener('click', () => {
   autoResume = false;
   stopScan();
