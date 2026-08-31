@@ -255,8 +255,8 @@ main.container { padding-bottom: 48px; }
 }
 .del-btn:hover { color: var(--fail); background: var(--fail-bg); }
 
-.export-actions { display: flex; gap: 10px; margin-top: 14px; }
-.export-actions .btn { flex: 1; }
+.export-actions { display: flex; gap: 8px; margin-top: 14px; }
+.export-actions .btn { flex: 1; padding: 10px 4px; font-size: 14px; }
 
 /* ---------- 浏览器环境提示 ---------- */
 .browser-tip {

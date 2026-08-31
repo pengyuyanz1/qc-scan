@@ -31,8 +31,10 @@ const els = {
   browserTip: $('browser-tip'),
   csvModal: $('csv-modal'),
   csvText: $('csv-text'),
+  csvModalTip: $('csv-modal-tip'),
   btnCopyCsv: $('btn-copy-csv'),
   btnCloseCsv: $('btn-close-csv'),
+  btnCopyData: $('btn-copy-data'),
 };
 
 let scanner = null;        // html5-qrcode 实例
@@ -143,6 +145,19 @@ function copyCsvText() {
   } else {
     fallback();
   }
+}
+
+function openCopyModal() {
+  const records = loadRecords();
+  if (!records.length) {
+    toast('暂无记录可复制', 'error');
+    return;
+  }
+  els.csvText.value = recordsToCsv(records);
+  els.csvModalTip.textContent = isWeChatEnv()
+    ? '微信/企业微信内无法直接下载 Excel 文件，推荐使用复制方式：复制后粘贴发送到电脑（如文件传输助手），保存为 .csv 文件即可用 Excel 打开。'
+    : '复制后可粘贴到电脑或其他设备：粘贴到记事本另存为 .csv 文件可用 Excel 打开，也可直接粘贴到 Excel 表格中使用。';
+  els.csvModal.classList.remove('hidden');
 }
 
 /* ---------- 扫码 ---------- */
@@ -474,8 +489,7 @@ function exportExcel() {
   }
   if (isWeChatEnv()) {
     // 微信/企业微信内置浏览器无法直接下载文件，改用复制文本方式导出
-    els.csvText.value = recordsToCsv(records);
-    els.csvModal.classList.remove('hidden');
+    openCopyModal();
     return;
   }
   const data = records.map((r) => ({
@@ -540,6 +554,7 @@ els.btnExport.addEventListener('click', exportExcel);
 els.btnClear.addEventListener('click', clearAll);
 els.btnCopyCsv.addEventListener('click', copyCsvText);
 els.btnCloseCsv.addEventListener('click', () => els.csvModal.classList.add('hidden'));
+els.btnCopyData.addEventListener('click', openCopyModal);
 
 // 微信/企业微信环境提示：建议用浏览器打开以获得完整功能
 if (isWeChatEnv()) {
