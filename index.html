@@ -22,7 +22,18 @@
         <h2>① 扫描产品二维码</h2>
         <button id="toggle-manual" class="link-btn" type="button">手动输入</button>
       </div>
-      <div id="reader" class="reader hidden"></div>
+      <div class="reader-wrap hidden" id="reader-wrap">
+        <div id="reader" class="reader"></div>
+      </div>
+      <div class="zoom-panel hidden" id="zoom-panel">
+        <span class="zoom-label">放大</span>
+        <div class="zoom-btns" id="zoom-btns">
+          <button class="zoom-btn active" data-zoom="1" type="button">1×</button>
+          <button class="zoom-btn" data-zoom="2" type="button">2×</button>
+          <button class="zoom-btn" data-zoom="3" type="button">3×</button>
+        </div>
+        <span class="zoom-mode-tip" id="zoom-mode-tip"></span>
+      </div>
       <div class="scan-actions">
         <button id="btn-start" class="btn btn-primary" type="button">开始扫码</button>
         <button id="btn-stop" class="btn btn-ghost hidden" type="button">停止扫码</button>
@@ -31,7 +42,7 @@
         <input id="manual-input" type="text" placeholder="请输入产品编号" autocomplete="off" />
         <button type="submit" class="btn btn-ghost">确定</button>
       </form>
-      <p class="tip">扫码需要摄像头权限，请在 HTTPS 或 localhost 环境下使用；摄像头不可用时可手动输入编号。</p>
+      <p class="tip">扫码需要摄像头权限，请在 HTTPS 或 localhost 环境下使用；摄像头不可用时可手动输入编号。二维码较小或距离较远时，可点按"放大"提高识别率。</p>
     </section>
 
     <!-- ② 判定 -->

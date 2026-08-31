@@ -6,6 +6,9 @@ const $ = (id) => document.getElementById(id);
 
 const els = {
   reader: $('reader'),
+  readerWrap: $('reader-wrap'),
+  zoomPanel: $('zoom-panel'),
+  zoomModeTip: $('zoom-mode-tip'),
   btnStart: $('btn-start'),
   btnStop: $('btn-stop'),
   toggleManual: $('toggle-manual'),
@@ -32,6 +35,9 @@ let currentCode = null;    // 当前待提交的产品编号
 let selectedResult = null; // '合格' | '不合格'
 let autoResume = false;    // 提交后是否自动继续扫码
 let toastTimer = null;
+let zoomMode = null;       // 'native'=摄像头原生变焦 | 'css'=数码放大 | null=未检测
+let zoomValue = 1;         // 当前放大倍率（作为偏好保留，扫码重启后自动恢复）
+let zoomCaps = null;       // 原生变焦能力范围 { min, max, step }
 
 /* ---------- 数据存取 ---------- */
 
@@ -78,17 +84,37 @@ async function startScan() {
   }
   try {
     if (!scanner) scanner = new Html5Qrcode('reader', { verbose: false });
-    els.reader.classList.remove('hidden');
+    els.readerWrap.classList.remove('hidden');
+    els.reader.style.transform = ''; // 先复位，启动成功后按倍率重新应用
     await scanner.start(
       { facingMode: 'environment' },
-      { fps: 10, qrbox: { width: 230, height: 230 } },
+      {
+        fps: 10,
+        // 扫描框：数码放大时按倍率缩小裁剪区，等效放大解码图像，利于识别小二维码
+        qrbox: (vw, vh) => {
+          const base = Math.round(Math.min(Math.min(vw, vh) * 0.62, 220));
+          const factor = zoomMode === 'css' && zoomValue > 1 ? zoomValue : 1;
+          const size = Math.max(Math.round(base / factor), 80);
+          return { width: size, height: size };
+        },
+        // 请求高分辨率视频流：小二维码在画面中的像素更多，识别更准
+        videoConstraints: {
+          facingMode: 'environment',
+          width: { ideal: 2560 },
+          height: { ideal: 1440 },
+        },
+        // 支持时使用浏览器原生 BarcodeDetector，识别性能更好
+        experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+      },
       onScanSuccess
     );
     scanning = true;
     autoResume = false;
     updateScanButtons();
+    await initZoomSupport();
+    await applyZoomOnStart();
   } catch (err) {
-    els.reader.classList.add('hidden');
+    els.readerWrap.classList.add('hidden');
     const reason = err && err.message ? err.message : '未知错误';
     toast(`无法启动摄像头（${reason}），可改用手动输入`, 'error');
   }
@@ -101,7 +127,9 @@ async function stopScan() {
     await scanner.stop();
     scanner.clear();
   } catch { /* 忽略停止过程中的异常 */ }
-  els.reader.classList.add('hidden');
+  els.readerWrap.classList.add('hidden');
+  els.reader.style.transform = '';
+  els.zoomPanel.classList.add('hidden');
   updateScanButtons();
 }
 
