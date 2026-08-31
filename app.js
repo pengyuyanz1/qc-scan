@@ -27,6 +27,7 @@ const els = {
   btnExport: $('btn-export'),
   btnClear: $('btn-clear'),
   toast: $('toast'),
+  storageWarning: $('storage-warning'),
 };
 
 let scanner = null;        // html5-qrcode 实例
@@ -53,8 +54,32 @@ function loadRecords() {
 function saveRecords(records) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+    return true;
   } catch {
-    toast('保存失败：浏览器存储不可用', 'error');
+    // 存储失败（通常是空间已满）：显示醒目常驻警告，并保留当前表单以便清理后重试
+    els.storageWarning.textContent =
+      '警告：记录保存失败，本地存储已满或不可用！请立即导出 Excel，导出后清空记录，再重新提交本条记录。';
+    els.storageWarning.classList.remove('hidden');
+    toast('保存失败：存储空间已满，请先导出并清空', 'error');
+    return false;
+  }
+}
+
+/* 浏览器一般为 localStorage 提供约 5MB 空间 */
+const STORAGE_QUOTA = 5 * 1024 * 1024;
+
+function updateStorageWarning() {
+  let used = 0;
+  try {
+    used = (localStorage.getItem(STORAGE_KEY) || '').length;
+  } catch { return; }
+  const ratio = used / STORAGE_QUOTA;
+  if (ratio >= 0.8) {
+    els.storageWarning.textContent =
+      `注意：本地存储已用约 ${Math.round(ratio * 100)}%（约 ${Math.round(used / 1024)}KB），存满后新记录将无法保存。请尽快导出 Excel，并在导出后清空记录。`;
+    els.storageWarning.classList.remove('hidden');
+  } else {
+    els.storageWarning.classList.add('hidden');
   }
 }
 
@@ -280,12 +305,12 @@ function submit() {
     };
     records.splice(idx, 1);
     records.unshift(updated);
-    saveRecords(records);
+    if (!saveRecords(records)) return; // 保存失败时保留表单，清理后可重新提交
     renderHistory();
     toast('已覆盖之前的记录', 'success');
   } else {
     records.unshift({ code: currentCode, result: selectedResult, scanTime: now, updateTime: now });
-    saveRecords(records);
+    if (!saveRecords(records)) return;
     renderHistory();
     toast('已保存', 'success');
   }
@@ -315,9 +340,15 @@ function renderHistory() {
 
   els.stats.innerHTML = '';
   if (total) {
+    let used = '';
+    try {
+      const kb = Math.round((localStorage.getItem(STORAGE_KEY) || '').length / 1024);
+      if (kb > 0) used = ` · 存储 ${kb}KB`;
+    } catch { /* 忽略 */ }
     els.stats.innerHTML =
-      `共 <b>${total}</b> 条 · 合格 <b class="c-pass">${passCount}</b> · 不合格 <b class="c-fail">${total - passCount}</b>`;
+      `共 <b>${total}</b> 条 · 合格 <b class="c-pass">${passCount}</b> · 不合格 <b class="c-fail">${total - passCount}</b>${used}`;
   }
+  updateStorageWarning();
 
   els.tbody.innerHTML = '';
   if (!total) {
@@ -410,6 +441,12 @@ function exportExcel() {
                 `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
   XLSX.writeFile(wb, `质检记录_${stamp}.xlsx`);
   toast('Excel 已导出', 'success');
+  // 建议导出后清空，释放存储空间，避免长期积累存满
+  if (window.confirm('Excel 已导出。是否清空已导出的记录，以释放存储空间？')) {
+    localStorage.removeItem(STORAGE_KEY);
+    renderHistory();
+    toast('已清空记录，可继续扫码');
+  }
 }
 
 /* ---------- 手动输入 ---------- */
