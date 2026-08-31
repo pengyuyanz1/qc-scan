@@ -99,14 +99,14 @@ main.container { padding-bottom: 48px; }
   margin-top: 12px;
 }
 .zoom-label { font-size: 13px; color: var(--muted); flex-shrink: 0; }
-.zoom-btns { display: flex; gap: 5px; flex: 1; }
+.zoom-btns { display: flex; gap: 6px; flex: 1; }
 .zoom-btn {
   flex: 1;
-  padding: 7px 0;
+  padding: 8px 0;
   border: 2px solid var(--border);
   background: #fff;
   border-radius: 9px;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   color: var(--muted);
   cursor: pointer;

@@ -83,7 +83,12 @@ async function startScan() {
     return;
   }
   try {
-    if (!scanner) scanner = new Html5Qrcode('reader', { verbose: false });
+    // 每次都用全新实例启动：规避复用旧实例在部分设备上重启后黑屏的问题
+    if (scanner) {
+      try { await scanner.stop(); } catch { /* 已停止则忽略 */ }
+    }
+    els.reader.innerHTML = '';
+    scanner = new Html5Qrcode('reader', { verbose: false });
     applyReaderWidth(); // 数码放大模式下按倍率预设取景宽度
     els.readerWrap.classList.remove('hidden');
     await scanner.start(
@@ -122,10 +127,7 @@ async function startScan() {
 async function stopScan() {
   if (!scanning) return;
   scanning = false;
-  try {
-    await scanner.stop();
-    scanner.clear();
-  } catch { /* 忽略停止过程中的异常 */ }
+  try { await scanner.stop(); } catch { /* 忽略停止过程中的异常 */ }
   els.readerWrap.classList.add('hidden');
   els.zoomPanel.classList.add('hidden');
   updateScanButtons();
@@ -289,7 +291,8 @@ function submit() {
   resetResultForm();
   if (autoResume) {
     autoResume = false;
-    startScan();
+    // 稍作延迟，给摄像头留出释放与重启的时间，避免重启后黑屏
+    setTimeout(startScan, 300);
   }
 }
 
