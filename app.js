@@ -168,7 +168,7 @@ function openCopyModal() {
 const JOB_INTERVAL = 110;      // 提交解码任务的最小间隔
 const FALLBACK_INTERVAL = 220; // 无 Worker 时主线程解码限频（避免卡顿）
 const JSQR_CDN = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
-const WORKER_URL = 'decoder-worker.js?v=2';
+const WORKER_URL = 'decoder-worker.js?v=3';
 const FAST_MAX_EDGE = 640;     // 快速扫描画布长边：全帧降采样，先解大码
 const MEDIUM_INTERVAL = 450;   // 中速精扫最小间隔
 const MEDIUM_MAX_EDGE = 1280;  // 中速精扫画布长边：全帧较高分辨率
@@ -181,10 +181,10 @@ const AUTO_ZOOM_STEP = 1800;   // 自动放大的逐级间隔
 const AUTO_ZOOM_MAX = 4;       // 自动放大上限
 const SCAN_TIP_INTERVAL = 6000; // 识别失败时切换提示的间隔
 const SCAN_TIPS = [
-  '未识别到二维码：请调整距离或角度',
-  '小二维码请置于取景框中心，保持 10–25cm 距离',
-  '可点按下方「放大」辅助识别小二维码',
-  '请检查二维码是否清晰、无反光遮挡',
+  '未识别到条码：请调整距离或角度',
+  '小条码请置于取景框中心，保持 10–25cm 距离',
+  '可点按下方「放大」辅助识别小条码',
+  '请检查条码是否清晰、无反光遮挡',
 ];
 
 /* 解码用离屏画布 */
@@ -216,6 +216,7 @@ let lastDeepAt = 0;         // 上次深扫时间戳
 let deepSweepCount = 0;     // 深扫轮次（用于隔次尝试反色）
 let watchTimer = 0;         // 亮度/自动放大/状态提示定时器
 let mainJsQRLoading = null; // 主线程 jsQR 兜底加载 Promise（防重复注入）
+let fastZxingToggle = false; // 快速扫是否穿插 DataMatrix 解码（隔帧执行控耗时）
 let isDark = false;         // 画面是否偏暗
 let lastTipAt = 0;          // 上次切换提示的时间
 let tipIdx = 0;             // 提示轮换索引
@@ -277,12 +278,15 @@ async function startScan() {
     els.readerWrap.style.aspectRatio = `${videoEl.videoWidth} / ${videoEl.videoHeight}`;
   }
 
-  // 首选浏览器原生 BarcodeDetector（硬件加速、速度快）；
-  // 构造或调用失败（部分微信内核）时自动回退 jsQR
+  // 首选浏览器原生 BarcodeDetector（同时尝试 QR + DataMatrix，逐级降级）；
+  // 仅作无 Worker 时的主线程兜底
   barcodeDetector = null;
   if ('BarcodeDetector' in window) {
-    try { barcodeDetector = new window.BarcodeDetector({ formats: ['qr_code'] }); }
-    catch { barcodeDetector = null; }
+    try { barcodeDetector = new window.BarcodeDetector({ formats: ['qr_code', 'data_matrix'] }); }
+    catch {
+      try { barcodeDetector = new window.BarcodeDetector({ formats: ['qr_code'] }); }
+      catch { barcodeDetector = null; }
+    }
   }
 
   scanning = true;
@@ -303,7 +307,7 @@ async function startScan() {
   initZoomSupport();
   applyZoomOnStart();
   applyCssZoomPreview();
-  setStatus('请将二维码置于取景框内');
+  setStatus('请将二维码/DataMatrix 置于取景框内');
 
   rafId = requestAnimationFrame(decodeLoop);
   watchTimer = setInterval(scanWatch, 500);
@@ -351,8 +355,8 @@ function initDecodeWorker() {
     decodeWorker.onmessage = (e) => {
       const msg = e.data || {};
       if (msg.type === 'ready') {
-        // Worker 内两个引擎都不可用（如 CDN 加载失败）：放弃 Worker
-        if (!msg.hasDetector && !msg.hasJsQR) {
+        // Worker 内所有解码引擎都不可用（如 CDN 加载失败）：放弃 Worker
+        if (!msg.hasDetector && !msg.hasJsQR && !msg.hasZxing) {
           try { decodeWorker.terminate(); } catch { /* 忽略 */ }
           decodeWorker = null;
           jobInFlight = false;
@@ -398,6 +402,7 @@ function decodeLoop(ts) {
 // 快速（全帧降采样）→ 中速（全帧较高分辨率）→ 深扫（中心区域原始分辨率 + 2 倍放大）
 function submitJob(ts) {
   let canvas, ctx, inversion = 'dontInvert';
+  let zxing = null; // 是否在本帧尝试 DataMatrix 解码
   if (ts - lastDeepAt >= DEEP_INTERVAL) {
     lastDeepAt = ts;
     drawDeepCrop();
@@ -405,15 +410,20 @@ function submitJob(ts) {
     ctx = deepCtx;
     // 隔轮尝试反色：兼顾金属雕刻等反色码
     inversion = deepSweepCount++ % 2 ? 'attemptBoth' : 'dontInvert';
+    zxing = 'hard'; // 深扫必跑 DataMatrix（TRY_HARDER + 反色）
   } else if (ts - lastMediumAt >= MEDIUM_INTERVAL) {
     lastMediumAt = ts;
     drawCrop(mediumCanvas, mediumCtx, getZoomCrop(), MEDIUM_MAX_EDGE);
     canvas = mediumCanvas;
     ctx = mediumCtx;
+    zxing = 'fast';
   } else {
     drawCrop(fastCanvas, fastCtx, getZoomCrop(), FAST_MAX_EDGE);
     canvas = fastCanvas;
     ctx = fastCtx;
+    // 快速扫隔帧穿插 DataMatrix，控制单帧耗时（QR 识别速度不受影响）
+    fastZxingToggle = !fastZxingToggle;
+    zxing = fastZxingToggle ? 'fast' : null;
   }
 
   let img;
@@ -424,7 +434,7 @@ function submitJob(ts) {
   jobId++;
   // transferable：像素缓冲零拷贝转移给 Worker
   decodeWorker.postMessage(
-    { id: jobId, width: canvas.width, height: canvas.height, buffer: img.data.buffer, inversion },
+    { id: jobId, width: canvas.width, height: canvas.height, buffer: img.data.buffer, inversion, zxing },
     [img.data.buffer]
   );
 }
@@ -570,7 +580,7 @@ function refreshScanStatus() {
     setStatus(SCAN_TIPS[tipIdx++ % SCAN_TIPS.length], 'warn');
     return;
   }
-  if (now - lastTipAt > SCAN_TIP_INTERVAL) setStatus('请将二维码置于取景框内');
+  if (now - lastTipAt > SCAN_TIP_INTERVAL) setStatus('请将二维码/DataMatrix 置于取景框内');
 }
 
 /* ---------- 放大功能（小二维码增强） ---------- */
