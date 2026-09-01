@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#4f46e5" />
   <title>QC 扫码质检</title>
-  <link rel="stylesheet" href="style.css?v=9" />
+  <link rel="stylesheet" href="style.css?v=10" />
 </head>
 <body>
   <header class="app-header">
@@ -28,7 +28,15 @@
       </div>
       <div class="reader-wrap hidden" id="reader-wrap">
         <div id="reader" class="reader"></div>
+        <!-- 取景框仅作视觉引导，不影响解码范围：全画面均可识别 -->
+        <div class="reticle" aria-hidden="true">
+          <div class="reticle-frame">
+            <i></i><i></i><i></i><i></i>
+            <span class="reticle-line"></span>
+          </div>
+        </div>
       </div>
+      <p class="scan-status hidden" id="scan-status"></p>
       <div class="zoom-panel hidden" id="zoom-panel">
         <span class="zoom-label">放大</span>
         <div class="zoom-btns" id="zoom-btns">
@@ -46,7 +54,7 @@
         <input id="manual-input" type="text" placeholder="请输入产品编号" autocomplete="off" />
         <button type="submit" class="btn btn-ghost">确定</button>
       </form>
-      <p class="tip">扫码需要摄像头权限，请在 HTTPS 或 localhost 环境下使用；摄像头不可用时可手动输入编号。二维码较小或距离较远时，可点按"放大"提高识别率。</p>
+      <p class="tip">扫码需要摄像头权限，请在 HTTPS 或 localhost 环境下使用；摄像头不可用时可手动输入编号。支持全画面识别，二维码无需占满取景框；二维码较小或距离较远时，可点按"放大"提高识别率。</p>
     </section>
 
     <!-- ② 判定 -->
@@ -111,8 +119,8 @@
 
   <div class="toast" id="toast"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

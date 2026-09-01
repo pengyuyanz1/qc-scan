@@ -71,6 +71,7 @@ main.container { padding-bottom: 48px; }
 
 /* ---------- 扫码区 ---------- */
 .reader-wrap {
+  position: relative;
   display: flex;
   justify-content: center;
   align-items: center;
@@ -88,8 +89,63 @@ main.container { padding-bottom: 48px; }
   display: block;
   width: 100% !important;
   height: auto !important;
+  transform-origin: center center;
+  transition: transform .25s ease;
 }
-.reader img[alt="Info icon"] { display: none; }
+
+/* 取景框：仅作视觉引导，全画面均可识别 */
+.reticle {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 2;
+}
+.reticle-frame {
+  width: min(70%, 300px);
+  aspect-ratio: 1 / 1;
+  border-radius: 14px;
+  position: relative;
+  /* 用大范围阴影做半透明遮罩，突出取景区域 */
+  box-shadow: 0 0 0 200vmax rgba(0, 0, 0, .32);
+}
+.reticle-frame i {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  border: 3px solid rgba(255, 255, 255, .95);
+}
+.reticle-frame i:nth-child(1) { top: 0; left: 0; border-right: none; border-bottom: none; border-top-left-radius: 14px; }
+.reticle-frame i:nth-child(2) { top: 0; right: 0; border-left: none; border-bottom: none; border-top-right-radius: 14px; }
+.reticle-frame i:nth-child(3) { bottom: 0; left: 0; border-right: none; border-top: none; border-bottom-left-radius: 14px; }
+.reticle-frame i:nth-child(4) { bottom: 0; right: 0; border-left: none; border-top: none; border-bottom-right-radius: 14px; }
+.reticle-line {
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  top: 8%;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .95), transparent);
+  animation: scanline 2.2s ease-in-out infinite;
+}
+@keyframes scanline {
+  0% { top: 8%; }
+  50% { top: 90%; }
+  100% { top: 8%; }
+}
+
+/* 扫码状态提示条 */
+.scan-status {
+  margin: 8px 0 0;
+  min-height: 18px;
+  font-size: 13px;
+  text-align: center;
+  color: var(--muted);
+}
+.scan-status.warn { color: #b45309; }
 
 /* ---------- 放大控制 ---------- */
 .zoom-panel {
