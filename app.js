@@ -163,13 +163,18 @@ function openCopyModal() {
 /* ---------- 扫码（BarcodeDetector + jsQR 双引擎） ---------- */
 
 /* 解码引擎参数 */
-const DECODE_INTERVAL = 66;  // 快速扫描节流（约 15 次/秒）
-const FAST_MAX_EDGE = 800;   // 快速扫描画布长边：降采样后先快速定位解码
-const SLOW_MAX_EDGE = 1600;  // 精扫画布长边：小码/远码增强
-const SLOW_EVERY = 4;        // 每 N 次快速扫描穿插一次精扫
+const DECODE_INTERVAL = 66;   // 快速扫描节流（约 15 次/秒）
+const FAST_MAX_EDGE = 800;    // 快速扫描画布长边：先快速解大码
+const MEDIUM_INTERVAL = 250;  // 中速精扫最小间隔（接近原始分辨率全帧）
+const MEDIUM_MAX_EDGE = 2560; // 中速精扫画布长边上限
+const DEEP_INTERVAL = 1000;   // 深扫（瓦片放大）最小间隔
+const TILE_SRC = 640;         // 深扫瓦片的原始像素尺寸
+const TILE_OVERLAP = 128;     // 瓦片重叠（防止二维码跨瓦片被切开）
+const TILE_SCALE = 2;         // 瓦片放大倍数：小码采样密度提升 4 倍
 const SCAN_TIP_INTERVAL = 6000; // 识别失败时切换提示的间隔
 const SCAN_TIPS = [
-  '未识别到二维码：请靠近一些',
+  '未识别到二维码：请调整距离或角度',
+  '小二维码请置于取景框中心，保持 10–25cm 距离',
   '可点按下方「放大」辅助识别小二维码',
   '请检查二维码是否清晰、无反光遮挡',
 ];
@@ -177,8 +182,10 @@ const SCAN_TIPS = [
 /* 解码用离屏画布 */
 const fastCanvas = document.createElement('canvas');
 const fastCtx = fastCanvas.getContext('2d', { willReadFrequently: true });
-const slowCanvas = document.createElement('canvas');
-const slowCtx = slowCanvas.getContext('2d', { willReadFrequently: true });
+const mediumCanvas = document.createElement('canvas');
+const mediumCtx = mediumCanvas.getContext('2d', { willReadFrequently: true });
+const tileCanvas = document.createElement('canvas');
+const tileCtx = tileCanvas.getContext('2d', { willReadFrequently: true });
 const tinyCanvas = document.createElement('canvas');
 tinyCanvas.width = 32;
 tinyCanvas.height = 32;
@@ -189,10 +196,13 @@ let videoEl = null;         // <video> 元素
 let cameraStream = null;    // 摄像头媒体流
 let rafId = 0;              // 解码循环句柄
 let decoding = false;       // 是否正在解码（防止重入）
-let frameCount = 0;         // 解码帧计数（用于精扫节流）
+let frameCount = 0;         // 解码帧计数（调试参考）
 let lastDecodeAt = 0;       // 上次解码时间戳
 let scanStartAt = 0;        // 本次扫码开始时间
 let barcodeDetector = null; // 原生 BarcodeDetector 引擎（不可用时回退 jsQR）
+let lastMediumAt = 0;       // 上次中速精扫时间戳
+let lastDeepAt = 0;         // 上次深扫时间戳
+let deepSweepCount = 0;     // 深扫轮次（用于隔次尝试反色）
 let brightTimer = 0;        // 亮度检测定时器
 let isDark = false;         // 画面是否偏暗
 let lastTipAt = 0;          // 上次切换提示的时间
@@ -222,8 +232,10 @@ async function startScan() {
       audio: false,
       video: {
         facingMode: 'environment',
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
+        // 请求尽可能高的分辨率（不支持 4K 的设备自动回退 1080p 等）：
+        // 小二维码在传感器上的像素更多，是识别小码的基础
+        width: { ideal: 3840 },
+        height: { ideal: 2160 },
         // 直接在初始约束中请求连续自动对焦：远近切换时自动合焦，小码更清晰
         advanced: [{ focusMode: 'continuous' }],
       },
@@ -264,6 +276,9 @@ async function startScan() {
   autoResume = false;
   frameCount = 0;
   lastDecodeAt = 0;
+  lastMediumAt = 0;
+  lastDeepAt = 0;
+  deepSweepCount = 0;
   decoding = false;
   scanStartAt = performance.now();
   lastTipAt = 0;
@@ -321,7 +336,7 @@ function decodeLoop(ts) {
   if (ts - lastDecodeAt < DECODE_INTERVAL) return;
   lastDecodeAt = ts;
   decoding = true;
-  decodeFrame()
+  decodeFrame(ts)
     .then((text) => { if (text && scanning) onScanSuccess(text); })
     .catch(() => { /* 单帧解码失败不影响后续 */ })
     .finally(() => { decoding = false; });
@@ -350,12 +365,13 @@ function drawCrop(canvas, ctx, crop, maxEdge) {
   ctx.drawImage(videoEl, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, w, h);
 }
 
-async function decodeFrame() {
+async function decodeFrame(ts) {
   const crop = getZoomCrop();
   drawCrop(fastCanvas, fastCtx, crop, FAST_MAX_EDGE);
   frameCount++;
 
-  // 第一优先：原生 BarcodeDetector（自带定位与解码，速度最快）
+  // ① 快速扫描：降采样全帧（大码秒识）
+  // 优先原生 BarcodeDetector（自带定位与解码，速度最快）
   if (barcodeDetector) {
     try {
       const codes = await barcodeDetector.detect(fastCanvas);
@@ -364,18 +380,67 @@ async function decodeFrame() {
       barcodeDetector = null; // 引擎不可用（部分微信内核），后续帧走 jsQR
     }
   }
-
   if (typeof jsQR !== 'function') return null;
-
-  // 快速扫描：降采样帧直接解码（不做反色尝试，速度优先）
   const fast = jsQRFromCanvas(fastCanvas, fastCtx, 'dontInvert');
   if (fast) return fast;
 
-  // 周期性精扫：更高分辨率 + 尝试反色，专攻小码/远码/浅色码
-  if (frameCount % SLOW_EVERY === 0) {
-    drawCrop(slowCanvas, slowCtx, crop, SLOW_MAX_EDGE);
-    const slow = jsQRFromCanvas(slowCanvas, slowCtx, 'attemptBoth');
-    if (slow) return slow;
+  // ② 中速精扫：接近原始分辨率的全帧解码（中等/小码）
+  if (ts - lastMediumAt >= MEDIUM_INTERVAL) {
+    lastMediumAt = ts;
+    drawCrop(mediumCanvas, mediumCtx, crop, MEDIUM_MAX_EDGE);
+    if (barcodeDetector) {
+      try {
+        const codes = await barcodeDetector.detect(mediumCanvas);
+        if (codes && codes.length && codes[0].rawValue) return codes[0].rawValue;
+      } catch { barcodeDetector = null; }
+    }
+    const medium = jsQRFromCanvas(mediumCanvas, mediumCtx, 'dontInvert');
+    if (medium) return medium;
+  }
+
+  // ③ 深扫：全帧切瓦片并 2 倍插值放大后逐片解码（极小码/远码/高密度码）
+  if (ts - lastDeepAt >= DEEP_INTERVAL) {
+    lastDeepAt = ts;
+    const deep = tileScan(crop);
+    if (deep) return deep;
+  }
+  return null;
+}
+
+// 深扫：把（放大裁剪后的）画面切成带重叠的瓦片，逐片放大解码。
+// 插值放大不增加信息量，但能把 1~2 像素/模块的临界小码提升到可解码的采样密度
+function tileScan(crop) {
+  const step = TILE_SRC - TILE_OVERLAP;
+  const tiles = [];
+  for (let ty = crop.sy; ty < crop.sy + crop.sh; ty += step) {
+    for (let tx = crop.sx; tx < crop.sx + crop.sw; tx += step) {
+      const tw = Math.min(TILE_SRC, crop.sx + crop.sw - tx);
+      const th = Math.min(TILE_SRC, crop.sy + crop.sh - ty);
+      // 过小的残片交给相邻瓦片的重叠区覆盖
+      if (tw < TILE_OVERLAP || th < TILE_OVERLAP) continue;
+      tiles.push({ tx, ty, tw, th });
+    }
+  }
+  // 中心优先：小二维码通常被有意对准画面中心，先扫中心瓦片能更快命中
+  const cx = crop.sx + crop.sw / 2;
+  const cy = crop.sy + crop.sh / 2;
+  tiles.sort((a, b) => {
+    const da = (a.tx + a.tw / 2 - cx) ** 2 + (a.ty + a.th / 2 - cy) ** 2;
+    const db = (b.tx + b.tw / 2 - cx) ** 2 + (b.ty + b.th / 2 - cy) ** 2;
+    return da - db;
+  });
+  // 隔轮尝试反色：兼顾金属雕刻等反色码，避免每轮都翻倍耗时
+  const inversion = deepSweepCount++ % 2 ? 'attemptBoth' : 'dontInvert';
+  for (const t of tiles) {
+    const w = Math.round(t.tw * TILE_SCALE);
+    const h = Math.round(t.th * TILE_SCALE);
+    if (tileCanvas.width !== w || tileCanvas.height !== h) {
+      tileCanvas.width = w;
+      tileCanvas.height = h;
+    }
+    tileCtx.drawImage(videoEl, t.tx, t.ty, t.tw, t.th, 0, 0, w, h);
+    const res = jsQRFromCanvas(tileCanvas, tileCtx, inversion);
+    if (res) return res;
   }
   return null;
 }
