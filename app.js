@@ -169,15 +169,15 @@ const JOB_INTERVAL = 50;       // 提交解码任务的最小间隔（Worker 空
 const FALLBACK_INTERVAL = 220; // 无 Worker 时主线程解码限频（避免卡顿）
 const WORKER_URL = 'decoder-worker.js?v=4';
 const FAST_MAX_EDGE = 640;     // 快速扫描画布长边：全帧降采样，先解大码
-const MEDIUM_INTERVAL = 300;   // 中速精扫最小间隔
+const MEDIUM_INTERVAL = 350;   // 中速全帧扫最小间隔（覆盖偏离中心的较大条码）
 const MEDIUM_MAX_EDGE = 1280;  // 中速精扫画布长边：全帧较高分辨率
-const DEEP_INTERVAL = 500;     // 深扫最小间隔
+const DEEP_INTERVAL = 500;     // 深扫"标记轮"间隔（用于轮换反色尝试）
 const DEEP_CROP_EDGE = 800;    // 深扫中心方形区域原始像素上限
 const DEEP_SCALE = 2;          // 深扫放大倍数：小码采样密度提升 4 倍
 const JOB_TIMEOUT = 3000;      // 单个解码任务超时保护
 const AUTO_ZOOM_DELAY = 1200;  // 多久无识别后开始自动放大（小码场景尽早放大）
 const AUTO_ZOOM_STEP = 1200;   // 自动放大的逐级间隔
-const AUTO_ZOOM_MAX = 4;       // 自动放大上限
+const AUTO_ZOOM_MAX = 5;       // 自动放大上限
 const SCAN_TIP_INTERVAL = 6000; // 识别失败时切换提示的间隔
 const SCAN_TIPS = [
   '未识别到条码：请调整距离或角度',
@@ -244,9 +244,12 @@ async function startScan() {
       video: {
         facingMode: 'environment',
         // 请求尽可能高的分辨率（不支持 4K 的设备自动回退 1080p 等）：
-        // 小二维码在传感器上的像素更多，是识别小码的基础
+        // 小条码在传感器上的像素更多，是识别小码的基础
         width: { ideal: 3840 },
         height: { ideal: 2160 },
+        // 请求 30fps：部分设备 4K 下会降到低帧率，低帧率画面更新慢、
+        // 自动对焦收敛也慢，ideal 30 让浏览器优先选高帧率模式
+        frameRate: { ideal: 30 },
         // 直接在初始约束中请求连续自动对焦：远近切换时自动合焦，小码更清晰
         advanced: [{ focusMode: 'continuous' }],
       },
@@ -391,26 +394,29 @@ function decodeLoop(ts) {
   }
 }
 
-// 按时间阶梯选择扫描强度提交给 Worker：
-// 快速（全帧降采样）→ 中速（全帧较高分辨率）→ 深扫（中心区域原始分辨率 + 2 倍放大）
+// 扫描通道调度：小码场景下深扫（中心原始分辨率 + 2 倍放大）是最有效的通道，
+// Worker 空闲即深扫；中速全帧扫每 MEDIUM_INTERVAL 穿插一次，覆盖偏离中心的较大条码。
+// 每 DEEP_INTERVAL 的"标记轮"附带回色尝试（每 3 轮 1 次，避免深扫耗时频繁翻倍）
 function submitJob(ts) {
   let canvas, ctx, inversion = 'dontInvert';
-  if (ts - lastDeepAt >= DEEP_INTERVAL) {
-    lastDeepAt = ts;
-    drawDeepCrop();
-    canvas = deepCanvas;
-    ctx = deepCtx;
-    // 隔轮尝试反色：兼顾金属雕刻等反色码
-    inversion = deepSweepCount++ % 2 ? 'attemptBoth' : 'dontInvert';
-  } else if (ts - lastMediumAt >= MEDIUM_INTERVAL) {
+  const mediumDue = ts - lastMediumAt >= MEDIUM_INTERVAL;
+  const deepDue = ts - lastDeepAt >= DEEP_INTERVAL;
+
+  if (mediumDue && !deepDue) {
     lastMediumAt = ts;
     drawCrop(mediumCanvas, mediumCtx, getZoomCrop(), MEDIUM_MAX_EDGE);
     canvas = mediumCanvas;
     ctx = mediumCtx;
   } else {
-    drawCrop(fastCanvas, fastCtx, getZoomCrop(), FAST_MAX_EDGE);
-    canvas = fastCanvas;
-    ctx = fastCtx;
+    if (deepDue) {
+      lastDeepAt = ts;
+      // 每 3 轮深扫尝试 1 次反色：兼顾金属雕刻反色码，又不拖慢常规码
+      inversion = deepSweepCount % 3 === 2 ? 'attemptBoth' : 'dontInvert';
+      deepSweepCount++;
+    }
+    drawDeepCrop();
+    canvas = deepCanvas;
+    ctx = deepCtx;
   }
 
   let img;
@@ -575,6 +581,10 @@ async function applyNativeZoom(value) {
   const v = Math.min(Math.max(value, zoomCaps.min), zoomCaps.max);
   try {
     await track.applyConstraints({ advanced: [{ zoom: v }] });
+    // 变焦后部分设备会退出连续自动对焦：立即重新请求，加快重新合焦速度
+    try {
+      await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
+    } catch { /* 不支持则忽略 */ }
     return v;
   } catch {
     return null;
