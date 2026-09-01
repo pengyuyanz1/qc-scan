@@ -162,22 +162,21 @@ function openCopyModal() {
   els.csvModal.classList.remove('hidden');
 }
 
-/* ---------- 扫码（BarcodeDetector + jsQR 双引擎） ---------- */
+/* ---------- 扫码（仅 DataMatrix，Worker 后台解码） ---------- */
 
 /* 解码引擎参数 */
-const JOB_INTERVAL = 110;      // 提交解码任务的最小间隔
+const JOB_INTERVAL = 50;       // 提交解码任务的最小间隔（Worker 空闲即提交）
 const FALLBACK_INTERVAL = 220; // 无 Worker 时主线程解码限频（避免卡顿）
-const JSQR_CDN = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
-const WORKER_URL = 'decoder-worker.js?v=3';
+const WORKER_URL = 'decoder-worker.js?v=4';
 const FAST_MAX_EDGE = 640;     // 快速扫描画布长边：全帧降采样，先解大码
-const MEDIUM_INTERVAL = 450;   // 中速精扫最小间隔
+const MEDIUM_INTERVAL = 300;   // 中速精扫最小间隔
 const MEDIUM_MAX_EDGE = 1280;  // 中速精扫画布长边：全帧较高分辨率
-const DEEP_INTERVAL = 900;     // 深扫最小间隔
+const DEEP_INTERVAL = 500;     // 深扫最小间隔
 const DEEP_CROP_EDGE = 800;    // 深扫中心方形区域原始像素上限
 const DEEP_SCALE = 2;          // 深扫放大倍数：小码采样密度提升 4 倍
 const JOB_TIMEOUT = 3000;      // 单个解码任务超时保护
-const AUTO_ZOOM_DELAY = 2500;  // 多久无识别后开始自动放大
-const AUTO_ZOOM_STEP = 1800;   // 自动放大的逐级间隔
+const AUTO_ZOOM_DELAY = 1200;  // 多久无识别后开始自动放大（小码场景尽早放大）
+const AUTO_ZOOM_STEP = 1200;   // 自动放大的逐级间隔
 const AUTO_ZOOM_MAX = 4;       // 自动放大上限
 const SCAN_TIP_INTERVAL = 6000; // 识别失败时切换提示的间隔
 const SCAN_TIPS = [
@@ -215,8 +214,6 @@ let lastMediumAt = 0;       // 上次中速精扫时间戳
 let lastDeepAt = 0;         // 上次深扫时间戳
 let deepSweepCount = 0;     // 深扫轮次（用于隔次尝试反色）
 let watchTimer = 0;         // 亮度/自动放大/状态提示定时器
-let mainJsQRLoading = null; // 主线程 jsQR 兜底加载 Promise（防重复注入）
-let fastZxingToggle = false; // 快速扫是否穿插 DataMatrix 解码（隔帧执行控耗时）
 let isDark = false;         // 画面是否偏暗
 let lastTipAt = 0;          // 上次切换提示的时间
 let tipIdx = 0;             // 提示轮换索引
@@ -234,7 +231,7 @@ function getVideoTrack() {
 async function startScan() {
   if (scanning) return;
   initDecodeWorker();
-  if (!decodeWorker && !('BarcodeDetector' in window) && typeof jsQR !== 'function') {
+  if (!decodeWorker && !('BarcodeDetector' in window)) {
     toast('扫码组件加载失败，请检查网络，或改用手动输入', 'error');
     return;
   }
@@ -278,15 +275,11 @@ async function startScan() {
     els.readerWrap.style.aspectRatio = `${videoEl.videoWidth} / ${videoEl.videoHeight}`;
   }
 
-  // 首选浏览器原生 BarcodeDetector（同时尝试 QR + DataMatrix，逐级降级）；
-  // 仅作无 Worker 时的主线程兜底
+  // 首选浏览器原生 BarcodeDetector（仅 DataMatrix）；仅作无 Worker 时的主线程兜底
   barcodeDetector = null;
   if ('BarcodeDetector' in window) {
-    try { barcodeDetector = new window.BarcodeDetector({ formats: ['qr_code', 'data_matrix'] }); }
-    catch {
-      try { barcodeDetector = new window.BarcodeDetector({ formats: ['qr_code'] }); }
-      catch { barcodeDetector = null; }
-    }
+    try { barcodeDetector = new window.BarcodeDetector({ formats: ['data_matrix'] }); }
+    catch { barcodeDetector = null; }
   }
 
   scanning = true;
@@ -307,7 +300,7 @@ async function startScan() {
   initZoomSupport();
   applyZoomOnStart();
   applyCssZoomPreview();
-  setStatus('请将二维码/DataMatrix 置于取景框内');
+  setStatus('请将 DataMatrix 条码置于取景框内');
 
   rafId = requestAnimationFrame(decodeLoop);
   watchTimer = setInterval(scanWatch, 500);
@@ -355,8 +348,8 @@ function initDecodeWorker() {
     decodeWorker.onmessage = (e) => {
       const msg = e.data || {};
       if (msg.type === 'ready') {
-        // Worker 内所有解码引擎都不可用（如 CDN 加载失败）：放弃 Worker
-        if (!msg.hasDetector && !msg.hasJsQR && !msg.hasZxing) {
+        // Worker 内解码引擎都不可用（如 CDN 加载失败）：放弃 Worker
+        if (!msg.hasDetector && !msg.hasZxing) {
           try { decodeWorker.terminate(); } catch { /* 忽略 */ }
           decodeWorker = null;
           jobInFlight = false;
@@ -390,7 +383,7 @@ function decodeLoop(ts) {
     lastDecodeAt = ts;
     submitJob(ts);
   } else {
-    // 无 Worker 兜底：主线程 BarcodeDetector / jsQR（限频解码，避免卡顿）
+    // 无 Worker 兜底：主线程 BarcodeDetector（限频解码，避免卡顿）
     if (decoding || ts - lastDecodeAt < FALLBACK_INTERVAL) return;
     lastDecodeAt = ts;
     decoding = true;
@@ -402,7 +395,6 @@ function decodeLoop(ts) {
 // 快速（全帧降采样）→ 中速（全帧较高分辨率）→ 深扫（中心区域原始分辨率 + 2 倍放大）
 function submitJob(ts) {
   let canvas, ctx, inversion = 'dontInvert';
-  let zxing = null; // 是否在本帧尝试 DataMatrix 解码
   if (ts - lastDeepAt >= DEEP_INTERVAL) {
     lastDeepAt = ts;
     drawDeepCrop();
@@ -410,20 +402,15 @@ function submitJob(ts) {
     ctx = deepCtx;
     // 隔轮尝试反色：兼顾金属雕刻等反色码
     inversion = deepSweepCount++ % 2 ? 'attemptBoth' : 'dontInvert';
-    zxing = 'hard'; // 深扫必跑 DataMatrix（TRY_HARDER + 反色）
   } else if (ts - lastMediumAt >= MEDIUM_INTERVAL) {
     lastMediumAt = ts;
     drawCrop(mediumCanvas, mediumCtx, getZoomCrop(), MEDIUM_MAX_EDGE);
     canvas = mediumCanvas;
     ctx = mediumCtx;
-    zxing = 'fast';
   } else {
     drawCrop(fastCanvas, fastCtx, getZoomCrop(), FAST_MAX_EDGE);
     canvas = fastCanvas;
     ctx = fastCtx;
-    // 快速扫隔帧穿插 DataMatrix，控制单帧耗时（QR 识别速度不受影响）
-    fastZxingToggle = !fastZxingToggle;
-    zxing = fastZxingToggle ? 'fast' : null;
   }
 
   let img;
@@ -434,7 +421,7 @@ function submitJob(ts) {
   jobId++;
   // transferable：像素缓冲零拷贝转移给 Worker
   decodeWorker.postMessage(
-    { id: jobId, width: canvas.width, height: canvas.height, buffer: img.data.buffer, inversion, zxing },
+    { id: jobId, width: canvas.width, height: canvas.height, buffer: img.data.buffer, inversion },
     [img.data.buffer]
   );
 }
@@ -454,49 +441,21 @@ function drawDeepCrop() {
   deepCtx.drawImage(videoEl, sx, sy, edge, edge, 0, 0, size, size);
 }
 
-// 主线程兜底解码（仅在 Worker 不可用时执行）：
-// 先试原生 BarcodeDetector（带超时保护，失败后禁用），再降级 jsQR（按需动态加载）
+// 主线程兜底解码（仅在 Worker 不可用时执行）：原生 BarcodeDetector
 async function mainThreadDetect() {
   drawCrop(fastCanvas, fastCtx, getZoomCrop(), FAST_MAX_EDGE);
-
-  if (barcodeDetector) {
-    try {
-      const codes = await Promise.race([
-        barcodeDetector.detect(fastCanvas),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('detect timeout')), 2000)),
-      ]);
-      if (codes && codes.length && codes[0].rawValue) {
-        if (scanning) onScanSuccess(codes[0].rawValue);
-        return;
-      }
-    } catch {
-      barcodeDetector = null; // 引擎不可用（如无 GMS 设备），后续走 jsQR
-    }
-  }
-
-  if (typeof jsQR !== 'function') {
-    const ok = await ensureMainJsQR();
-    if (!ok) return;
-  }
+  if (!barcodeDetector) return;
   try {
-    const img = fastCtx.getImageData(0, 0, fastCanvas.width, fastCanvas.height);
-    const res = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
-    if (res && res.data && scanning) onScanSuccess(res.data);
-  } catch { /* 单帧失败忽略 */ }
-}
-
-// 动态加载主线程 jsQR（最后一次兜底，正常路径不会触发）
-function ensureMainJsQR() {
-  if (typeof jsQR === 'function') return Promise.resolve(true);
-  if (mainJsQRLoading) return mainJsQRLoading;
-  mainJsQRLoading = new Promise((resolve) => {
-    const s = document.createElement('script');
-    s.src = JSQR_CDN;
-    s.onload = () => resolve(typeof jsQR === 'function');
-    s.onerror = () => resolve(false);
-    document.head.appendChild(s);
-  });
-  return mainJsQRLoading;
+    const codes = await Promise.race([
+      barcodeDetector.detect(fastCanvas),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('detect timeout')), 2000)),
+    ]);
+    if (codes && codes.length && codes[0].rawValue && scanning) {
+      onScanSuccess(codes[0].rawValue);
+    }
+  } catch {
+    barcodeDetector = null; // 引擎不可用（如无 GMS 设备）
+  }
 }
 
 // 数码放大时：解码只取中心 1/倍率 区域（原始分辨率），等效放大二维码
@@ -580,7 +539,7 @@ function refreshScanStatus() {
     setStatus(SCAN_TIPS[tipIdx++ % SCAN_TIPS.length], 'warn');
     return;
   }
-  if (now - lastTipAt > SCAN_TIP_INTERVAL) setStatus('请将二维码/DataMatrix 置于取景框内');
+  if (now - lastTipAt > SCAN_TIP_INTERVAL) setStatus('请将 DataMatrix 条码置于取景框内');
 }
 
 /* ---------- 放大功能（小二维码增强） ---------- */
