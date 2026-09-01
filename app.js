@@ -166,6 +166,9 @@ function openCopyModal() {
 
 /* 解码引擎参数 */
 const JOB_INTERVAL = 110;      // 提交解码任务的最小间隔
+const FALLBACK_INTERVAL = 220; // 无 Worker 时主线程解码限频（避免卡顿）
+const JSQR_CDN = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
+const WORKER_URL = 'decoder-worker.js?v=2';
 const FAST_MAX_EDGE = 640;     // 快速扫描画布长边：全帧降采样，先解大码
 const MEDIUM_INTERVAL = 450;   // 中速精扫最小间隔
 const MEDIUM_MAX_EDGE = 1280;  // 中速精扫画布长边：全帧较高分辨率
@@ -212,6 +215,7 @@ let lastMediumAt = 0;       // 上次中速精扫时间戳
 let lastDeepAt = 0;         // 上次深扫时间戳
 let deepSweepCount = 0;     // 深扫轮次（用于隔次尝试反色）
 let watchTimer = 0;         // 亮度/自动放大/状态提示定时器
+let mainJsQRLoading = null; // 主线程 jsQR 兜底加载 Promise（防重复注入）
 let isDark = false;         // 画面是否偏暗
 let lastTipAt = 0;          // 上次切换提示的时间
 let tipIdx = 0;             // 提示轮换索引
@@ -229,7 +233,7 @@ function getVideoTrack() {
 async function startScan() {
   if (scanning) return;
   initDecodeWorker();
-  if (!decodeWorker && !('BarcodeDetector' in window)) {
+  if (!decodeWorker && !('BarcodeDetector' in window) && typeof jsQR !== 'function') {
     toast('扫码组件加载失败，请检查网络，或改用手动输入', 'error');
     return;
   }
@@ -343,7 +347,7 @@ function updateScanButtons() {
 function initDecodeWorker() {
   if (decodeWorker) return;
   try {
-    decodeWorker = new Worker('decoder-worker.js');
+    decodeWorker = new Worker(WORKER_URL);
     decodeWorker.onmessage = (e) => {
       const msg = e.data || {};
       if (msg.type === 'ready') {
@@ -371,9 +375,9 @@ function decodeLoop(ts) {
   if (!scanning) return;
   rafId = requestAnimationFrame(decodeLoop);
   if (!videoEl || videoEl.readyState < 2) return;
-  if (ts - lastDecodeAt < JOB_INTERVAL) return;
 
   if (decodeWorker) {
+    if (ts - lastDecodeAt < JOB_INTERVAL) return;
     if (jobInFlight) {
       // 任务超时保护：Worker 卡死时丢弃该任务继续
       if (ts - jobSentAt > JOB_TIMEOUT) jobInFlight = false;
@@ -382,8 +386,8 @@ function decodeLoop(ts) {
     lastDecodeAt = ts;
     submitJob(ts);
   } else {
-    // 无 Worker 兜底：仅主线程原生 BarcodeDetector（异步、轻量）
-    if (decoding || !barcodeDetector) return;
+    // 无 Worker 兜底：主线程 BarcodeDetector / jsQR（限频解码，避免卡顿）
+    if (decoding || ts - lastDecodeAt < FALLBACK_INTERVAL) return;
     lastDecodeAt = ts;
     decoding = true;
     mainThreadDetect().finally(() => { decoding = false; });
@@ -440,15 +444,49 @@ function drawDeepCrop() {
   deepCtx.drawImage(videoEl, sx, sy, edge, edge, 0, 0, size, size);
 }
 
+// 主线程兜底解码（仅在 Worker 不可用时执行）：
+// 先试原生 BarcodeDetector（带超时保护，失败后禁用），再降级 jsQR（按需动态加载）
 async function mainThreadDetect() {
   drawCrop(fastCanvas, fastCtx, getZoomCrop(), FAST_MAX_EDGE);
-  if (!barcodeDetector) return;
-  try {
-    const codes = await barcodeDetector.detect(fastCanvas);
-    if (codes && codes.length && codes[0].rawValue && scanning) {
-      onScanSuccess(codes[0].rawValue);
+
+  if (barcodeDetector) {
+    try {
+      const codes = await Promise.race([
+        barcodeDetector.detect(fastCanvas),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('detect timeout')), 2000)),
+      ]);
+      if (codes && codes.length && codes[0].rawValue) {
+        if (scanning) onScanSuccess(codes[0].rawValue);
+        return;
+      }
+    } catch {
+      barcodeDetector = null; // 引擎不可用（如无 GMS 设备），后续走 jsQR
     }
-  } catch { barcodeDetector = null; }
+  }
+
+  if (typeof jsQR !== 'function') {
+    const ok = await ensureMainJsQR();
+    if (!ok) return;
+  }
+  try {
+    const img = fastCtx.getImageData(0, 0, fastCanvas.width, fastCanvas.height);
+    const res = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+    if (res && res.data && scanning) onScanSuccess(res.data);
+  } catch { /* 单帧失败忽略 */ }
+}
+
+// 动态加载主线程 jsQR（最后一次兜底，正常路径不会触发）
+function ensureMainJsQR() {
+  if (typeof jsQR === 'function') return Promise.resolve(true);
+  if (mainJsQRLoading) return mainJsQRLoading;
+  mainJsQRLoading = new Promise((resolve) => {
+    const s = document.createElement('script');
+    s.src = JSQR_CDN;
+    s.onload = () => resolve(typeof jsQR === 'function');
+    s.onerror = () => resolve(false);
+    document.head.appendChild(s);
+  });
+  return mainJsQRLoading;
 }
 
 // 数码放大时：解码只取中心 1/倍率 区域（原始分辨率），等效放大二维码
