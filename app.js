@@ -44,7 +44,9 @@ let selectedResult = null; // '合格' | '不合格'
 let autoResume = false;    // 提交后是否自动继续扫码
 let toastTimer = null;
 let zoomMode = null;       // 'native'=摄像头原生变焦 | 'css'=数码放大 | null=未检测
-let zoomValue = 1;         // 当前放大倍率（作为偏好保留，扫码重启后自动恢复）
+let zoomPref = 1;          // 用户手动选择的放大偏好（跨扫码记忆）
+let zoomValue = 1;         // 当前生效倍率（含自动放大）
+let zoomUserSet = false;   // 本次扫码中用户是否手动设置过放大
 let zoomCaps = null;       // 原生变焦能力范围 { min, max, step }
 
 /* ---------- 数据存取 ---------- */
@@ -163,14 +165,17 @@ function openCopyModal() {
 /* ---------- 扫码（BarcodeDetector + jsQR 双引擎） ---------- */
 
 /* 解码引擎参数 */
-const DECODE_INTERVAL = 66;   // 快速扫描节流（约 15 次/秒）
-const FAST_MAX_EDGE = 800;    // 快速扫描画布长边：先快速解大码
-const MEDIUM_INTERVAL = 250;  // 中速精扫最小间隔（接近原始分辨率全帧）
-const MEDIUM_MAX_EDGE = 2560; // 中速精扫画布长边上限
-const DEEP_INTERVAL = 1000;   // 深扫（瓦片放大）最小间隔
-const TILE_SRC = 640;         // 深扫瓦片的原始像素尺寸
-const TILE_OVERLAP = 128;     // 瓦片重叠（防止二维码跨瓦片被切开）
-const TILE_SCALE = 2;         // 瓦片放大倍数：小码采样密度提升 4 倍
+const JOB_INTERVAL = 110;      // 提交解码任务的最小间隔
+const FAST_MAX_EDGE = 640;     // 快速扫描画布长边：全帧降采样，先解大码
+const MEDIUM_INTERVAL = 450;   // 中速精扫最小间隔
+const MEDIUM_MAX_EDGE = 1280;  // 中速精扫画布长边：全帧较高分辨率
+const DEEP_INTERVAL = 900;     // 深扫最小间隔
+const DEEP_CROP_EDGE = 800;    // 深扫中心方形区域原始像素上限
+const DEEP_SCALE = 2;          // 深扫放大倍数：小码采样密度提升 4 倍
+const JOB_TIMEOUT = 3000;      // 单个解码任务超时保护
+const AUTO_ZOOM_DELAY = 2500;  // 多久无识别后开始自动放大
+const AUTO_ZOOM_STEP = 1800;   // 自动放大的逐级间隔
+const AUTO_ZOOM_MAX = 4;       // 自动放大上限
 const SCAN_TIP_INTERVAL = 6000; // 识别失败时切换提示的间隔
 const SCAN_TIPS = [
   '未识别到二维码：请调整距离或角度',
@@ -184,8 +189,8 @@ const fastCanvas = document.createElement('canvas');
 const fastCtx = fastCanvas.getContext('2d', { willReadFrequently: true });
 const mediumCanvas = document.createElement('canvas');
 const mediumCtx = mediumCanvas.getContext('2d', { willReadFrequently: true });
-const tileCanvas = document.createElement('canvas');
-const tileCtx = tileCanvas.getContext('2d', { willReadFrequently: true });
+const deepCanvas = document.createElement('canvas');
+const deepCtx = deepCanvas.getContext('2d', { willReadFrequently: true });
 const tinyCanvas = document.createElement('canvas');
 tinyCanvas.width = 32;
 tinyCanvas.height = 32;
@@ -194,16 +199,19 @@ const tinyCtx = tinyCanvas.getContext('2d', { willReadFrequently: true });
 /* 扫码运行时状态 */
 let videoEl = null;         // <video> 元素
 let cameraStream = null;    // 摄像头媒体流
+let decodeWorker = null;    // 解码 Worker（后台线程解码，页面不卡顿）
+let jobId = 0;              // 解码任务编号
+let jobInFlight = false;    // 是否有任务在 Worker 中执行
+let jobSentAt = 0;          // 任务提交时间（超时保护）
 let rafId = 0;              // 解码循环句柄
-let decoding = false;       // 是否正在解码（防止重入）
-let frameCount = 0;         // 解码帧计数（调试参考）
-let lastDecodeAt = 0;       // 上次解码时间戳
+let decoding = false;       // 主线程兜底解码进行中（无 Worker 时）
+let lastDecodeAt = 0;       // 上次提交解码时间戳
 let scanStartAt = 0;        // 本次扫码开始时间
-let barcodeDetector = null; // 原生 BarcodeDetector 引擎（不可用时回退 jsQR）
+let barcodeDetector = null; // 主线程原生引擎（仅作无 Worker 时的兜底）
 let lastMediumAt = 0;       // 上次中速精扫时间戳
 let lastDeepAt = 0;         // 上次深扫时间戳
 let deepSweepCount = 0;     // 深扫轮次（用于隔次尝试反色）
-let brightTimer = 0;        // 亮度检测定时器
+let watchTimer = 0;         // 亮度/自动放大/状态提示定时器
 let isDark = false;         // 画面是否偏暗
 let lastTipAt = 0;          // 上次切换提示的时间
 let tipIdx = 0;             // 提示轮换索引
@@ -220,7 +228,8 @@ function getVideoTrack() {
 
 async function startScan() {
   if (scanning) return;
-  if (typeof jsQR !== 'function' && !('BarcodeDetector' in window)) {
+  initDecodeWorker();
+  if (!decodeWorker && !('BarcodeDetector' in window)) {
     toast('扫码组件加载失败，请检查网络，或改用手动输入', 'error');
     return;
   }
@@ -274,12 +283,14 @@ async function startScan() {
 
   scanning = true;
   autoResume = false;
-  frameCount = 0;
   lastDecodeAt = 0;
   lastMediumAt = 0;
   lastDeepAt = 0;
   deepSweepCount = 0;
+  jobInFlight = false;
   decoding = false;
+  zoomValue = zoomPref;        // 生效倍率从用户偏好起步
+  zoomUserSet = zoomPref > 1;  // 用户手动设过放大则不做自动放大
   scanStartAt = performance.now();
   lastTipAt = 0;
   tipIdx = 0;
@@ -291,14 +302,14 @@ async function startScan() {
   setStatus('请将二维码置于取景框内');
 
   rafId = requestAnimationFrame(decodeLoop);
-  brightTimer = setInterval(checkBrightness, 900);
+  watchTimer = setInterval(scanWatch, 500);
 }
 
 async function stopScan() {
   if (!scanning) return;
   scanning = false;
   cancelAnimationFrame(rafId);
-  clearInterval(brightTimer);
+  clearInterval(watchTimer);
   try { if (cameraStream) cameraStream.getTracks().forEach((t) => t.stop()); } catch { /* 忽略 */ }
   if (videoEl) {
     try { videoEl.srcObject = null; } catch { /* 忽略 */ }
@@ -327,19 +338,117 @@ function updateScanButtons() {
   els.btnStop.classList.toggle('hidden', !scanning);
 }
 
-/* ---------- 解码循环：全画面识别，两段式解码 ---------- */
+/* ---------- 解码循环：取帧在主线程（轻量），解码在 Worker（不卡页面） ---------- */
+
+function initDecodeWorker() {
+  if (decodeWorker) return;
+  try {
+    decodeWorker = new Worker('decoder-worker.js');
+    decodeWorker.onmessage = (e) => {
+      const msg = e.data || {};
+      if (msg.type === 'ready') {
+        // Worker 内两个引擎都不可用（如 CDN 加载失败）：放弃 Worker
+        if (!msg.hasDetector && !msg.hasJsQR) {
+          try { decodeWorker.terminate(); } catch { /* 忽略 */ }
+          decodeWorker = null;
+          jobInFlight = false;
+        }
+        return;
+      }
+      jobInFlight = false;
+      if (msg.text && scanning) onScanSuccess(msg.text);
+    };
+    decodeWorker.onerror = () => {
+      // Worker 加载/运行失败：退回主线程原生引擎（轻量，不阻塞）
+      jobInFlight = false;
+      try { decodeWorker.terminate(); } catch { /* 忽略 */ }
+      decodeWorker = null;
+    };
+  } catch { decodeWorker = null; }
+}
 
 function decodeLoop(ts) {
   if (!scanning) return;
   rafId = requestAnimationFrame(decodeLoop);
-  if (!videoEl || videoEl.readyState < 2 || decoding) return;
-  if (ts - lastDecodeAt < DECODE_INTERVAL) return;
-  lastDecodeAt = ts;
-  decoding = true;
-  decodeFrame(ts)
-    .then((text) => { if (text && scanning) onScanSuccess(text); })
-    .catch(() => { /* 单帧解码失败不影响后续 */ })
-    .finally(() => { decoding = false; });
+  if (!videoEl || videoEl.readyState < 2) return;
+  if (ts - lastDecodeAt < JOB_INTERVAL) return;
+
+  if (decodeWorker) {
+    if (jobInFlight) {
+      // 任务超时保护：Worker 卡死时丢弃该任务继续
+      if (ts - jobSentAt > JOB_TIMEOUT) jobInFlight = false;
+      else return;
+    }
+    lastDecodeAt = ts;
+    submitJob(ts);
+  } else {
+    // 无 Worker 兜底：仅主线程原生 BarcodeDetector（异步、轻量）
+    if (decoding || !barcodeDetector) return;
+    lastDecodeAt = ts;
+    decoding = true;
+    mainThreadDetect().finally(() => { decoding = false; });
+  }
+}
+
+// 按时间阶梯选择扫描强度提交给 Worker：
+// 快速（全帧降采样）→ 中速（全帧较高分辨率）→ 深扫（中心区域原始分辨率 + 2 倍放大）
+function submitJob(ts) {
+  let canvas, ctx, inversion = 'dontInvert';
+  if (ts - lastDeepAt >= DEEP_INTERVAL) {
+    lastDeepAt = ts;
+    drawDeepCrop();
+    canvas = deepCanvas;
+    ctx = deepCtx;
+    // 隔轮尝试反色：兼顾金属雕刻等反色码
+    inversion = deepSweepCount++ % 2 ? 'attemptBoth' : 'dontInvert';
+  } else if (ts - lastMediumAt >= MEDIUM_INTERVAL) {
+    lastMediumAt = ts;
+    drawCrop(mediumCanvas, mediumCtx, getZoomCrop(), MEDIUM_MAX_EDGE);
+    canvas = mediumCanvas;
+    ctx = mediumCtx;
+  } else {
+    drawCrop(fastCanvas, fastCtx, getZoomCrop(), FAST_MAX_EDGE);
+    canvas = fastCanvas;
+    ctx = fastCtx;
+  }
+
+  let img;
+  try { img = ctx.getImageData(0, 0, canvas.width, canvas.height); }
+  catch { return; }
+  jobInFlight = true;
+  jobSentAt = ts;
+  jobId++;
+  // transferable：像素缓冲零拷贝转移给 Worker
+  decodeWorker.postMessage(
+    { id: jobId, width: canvas.width, height: canvas.height, buffer: img.data.buffer, inversion },
+    [img.data.buffer]
+  );
+}
+
+// 深扫：取（放大裁剪后的）画面中心方形区域，按原始分辨率 2 倍放大。
+// 5mm 小码像素有限，插值放大能把临界小码提升到可解码的采样密度
+function drawDeepCrop() {
+  const crop = getZoomCrop();
+  const edge = Math.min(DEEP_CROP_EDGE, crop.sw, crop.sh);
+  const sx = crop.sx + (crop.sw - edge) / 2;
+  const sy = crop.sy + (crop.sh - edge) / 2;
+  const size = Math.round(edge * DEEP_SCALE);
+  if (deepCanvas.width !== size || deepCanvas.height !== size) {
+    deepCanvas.width = size;
+    deepCanvas.height = size;
+  }
+  deepCtx.drawImage(videoEl, sx, sy, edge, edge, 0, 0, size, size);
+}
+
+async function mainThreadDetect() {
+  drawCrop(fastCanvas, fastCtx, getZoomCrop(), FAST_MAX_EDGE);
+  if (!barcodeDetector) return;
+  try {
+    const codes = await barcodeDetector.detect(fastCanvas);
+    if (codes && codes.length && codes[0].rawValue && scanning) {
+      onScanSuccess(codes[0].rawValue);
+    }
+  } catch { barcodeDetector = null; }
 }
 
 // 数码放大时：解码只取中心 1/倍率 区域（原始分辨率），等效放大二维码
@@ -365,96 +474,18 @@ function drawCrop(canvas, ctx, crop, maxEdge) {
   ctx.drawImage(videoEl, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, w, h);
 }
 
-async function decodeFrame(ts) {
-  const crop = getZoomCrop();
-  drawCrop(fastCanvas, fastCtx, crop, FAST_MAX_EDGE);
-  frameCount++;
+/* ---------- 扫码实时反馈与自动放大 ---------- */
 
-  // ① 快速扫描：降采样全帧（大码秒识）
-  // 优先原生 BarcodeDetector（自带定位与解码，速度最快）
-  if (barcodeDetector) {
-    try {
-      const codes = await barcodeDetector.detect(fastCanvas);
-      if (codes && codes.length && codes[0].rawValue) return codes[0].rawValue;
-    } catch {
-      barcodeDetector = null; // 引擎不可用（部分微信内核），后续帧走 jsQR
-    }
-  }
-  if (typeof jsQR !== 'function') return null;
-  const fast = jsQRFromCanvas(fastCanvas, fastCtx, 'dontInvert');
-  if (fast) return fast;
-
-  // ② 中速精扫：接近原始分辨率的全帧解码（中等/小码）
-  if (ts - lastMediumAt >= MEDIUM_INTERVAL) {
-    lastMediumAt = ts;
-    drawCrop(mediumCanvas, mediumCtx, crop, MEDIUM_MAX_EDGE);
-    if (barcodeDetector) {
-      try {
-        const codes = await barcodeDetector.detect(mediumCanvas);
-        if (codes && codes.length && codes[0].rawValue) return codes[0].rawValue;
-      } catch { barcodeDetector = null; }
-    }
-    const medium = jsQRFromCanvas(mediumCanvas, mediumCtx, 'dontInvert');
-    if (medium) return medium;
-  }
-
-  // ③ 深扫：全帧切瓦片并 2 倍插值放大后逐片解码（极小码/远码/高密度码）
-  if (ts - lastDeepAt >= DEEP_INTERVAL) {
-    lastDeepAt = ts;
-    const deep = tileScan(crop);
-    if (deep) return deep;
-  }
-  return null;
+// 周期巡检：亮度检测 + 自动放大 + 状态提示刷新
+function scanWatch() {
+  if (!scanning) return;
+  checkBrightness();
+  autoZoomTick();
+  refreshScanStatus();
 }
-
-// 深扫：把（放大裁剪后的）画面切成带重叠的瓦片，逐片放大解码。
-// 插值放大不增加信息量，但能把 1~2 像素/模块的临界小码提升到可解码的采样密度
-function tileScan(crop) {
-  const step = TILE_SRC - TILE_OVERLAP;
-  const tiles = [];
-  for (let ty = crop.sy; ty < crop.sy + crop.sh; ty += step) {
-    for (let tx = crop.sx; tx < crop.sx + crop.sw; tx += step) {
-      const tw = Math.min(TILE_SRC, crop.sx + crop.sw - tx);
-      const th = Math.min(TILE_SRC, crop.sy + crop.sh - ty);
-      // 过小的残片交给相邻瓦片的重叠区覆盖
-      if (tw < TILE_OVERLAP || th < TILE_OVERLAP) continue;
-      tiles.push({ tx, ty, tw, th });
-    }
-  }
-  // 中心优先：小二维码通常被有意对准画面中心，先扫中心瓦片能更快命中
-  const cx = crop.sx + crop.sw / 2;
-  const cy = crop.sy + crop.sh / 2;
-  tiles.sort((a, b) => {
-    const da = (a.tx + a.tw / 2 - cx) ** 2 + (a.ty + a.th / 2 - cy) ** 2;
-    const db = (b.tx + b.tw / 2 - cx) ** 2 + (b.ty + b.th / 2 - cy) ** 2;
-    return da - db;
-  });
-  // 隔轮尝试反色：兼顾金属雕刻等反色码，避免每轮都翻倍耗时
-  const inversion = deepSweepCount++ % 2 ? 'attemptBoth' : 'dontInvert';
-  for (const t of tiles) {
-    const w = Math.round(t.tw * TILE_SCALE);
-    const h = Math.round(t.th * TILE_SCALE);
-    if (tileCanvas.width !== w || tileCanvas.height !== h) {
-      tileCanvas.width = w;
-      tileCanvas.height = h;
-    }
-    tileCtx.drawImage(videoEl, t.tx, t.ty, t.tw, t.th, 0, 0, w, h);
-    const res = jsQRFromCanvas(tileCanvas, tileCtx, inversion);
-    if (res) return res;
-  }
-  return null;
-}
-
-function jsQRFromCanvas(canvas, ctx, inversion) {
-  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const res = jsQR(img.data, img.width, img.height, { inversionAttempts: inversion });
-  return res && res.data ? res.data : null;
-}
-
-/* ---------- 扫码实时反馈 ---------- */
 
 function checkBrightness() {
-  if (!scanning || !videoEl || videoEl.readyState < 2) return;
+  if (!videoEl || videoEl.readyState < 2) return;
   try {
     tinyCtx.drawImage(videoEl, 0, 0, 32, 32);
     const d = tinyCtx.getImageData(0, 0, 32, 32).data;
@@ -464,7 +495,29 @@ function checkBrightness() {
     }
     isDark = sum / (d.length / 4) < 55;
   } catch { /* 忽略 */ }
-  refreshScanStatus();
+}
+
+// 自动放大：小二维码像素有限，持续无识别时逐级放大（优先摄像头原生变焦，
+// 不支持则裁剪中心区域按原始分辨率解码，等效数码放大）。用户手动点过放大则不干预
+async function autoZoomTick() {
+  if (!scanning || zoomUserSet || !zoomMode) return;
+  const elapsed = performance.now() - scanStartAt;
+  if (elapsed < AUTO_ZOOM_DELAY) return;
+  const level = Math.min(
+    2 + Math.floor((elapsed - AUTO_ZOOM_DELAY) / AUTO_ZOOM_STEP),
+    AUTO_ZOOM_MAX
+  );
+  if (level <= zoomValue) return;
+  let target = level;
+  if (zoomMode === 'native' && zoomCaps) {
+    const maxLevel = Math.floor(zoomCaps.max);
+    if (maxLevel < 2) return; // 原生变焦上限不足，放弃自动放大
+    target = Math.min(target, maxLevel);
+  }
+  if (target <= zoomValue) return;
+  await setEffectiveZoom(target);
+  lastTipAt = performance.now();
+  setStatus(`已自动放大至 ${target}×，请将小二维码对准画面中心`, 'warn');
 }
 
 function refreshScanStatus() {
@@ -505,8 +558,8 @@ function initZoomSupport() {
 }
 
 async function applyZoomOnStart() {
-  if (zoomValue <= 1 || zoomMode !== 'native') return;
-  await applyNativeZoom(zoomValue);
+  if (zoomPref <= 1 || zoomMode !== 'native') return;
+  await applyNativeZoom(zoomPref);
 }
 
 async function applyNativeZoom(value) {
@@ -530,16 +583,32 @@ function applyCssZoomPreview() {
 }
 
 async function setZoom(value) {
-  if (value === zoomValue) return;
+  if (value === zoomPref && value === zoomValue) return;
+  zoomPref = value;
+  zoomUserSet = true; // 用户手动设置后，本次扫码不再自动放大
+  if (!scanning) { // 未在扫码时仅记住偏好，下次启动时生效
+    zoomValue = value;
+    updateZoomButtonsUI();
+    return;
+  }
+  await setEffectiveZoom(value);
+}
+
+// 设置当前生效的放大倍率（用户手动或自动放大统一走这里）
+async function setEffectiveZoom(value) {
   zoomValue = value;
   updateZoomButtonsUI();
-  if (!scanning) return; // 未在扫码时仅记住偏好，下次启动时生效
+  if (!scanning || !videoEl) return;
   if (zoomMode === 'native') {
     const applied = await applyNativeZoom(value);
     if (applied == null) {
-      toast('变焦失败，该设备可能不支持', 'error');
+      // 原生变焦失败：本次扫码改用数码放大（裁剪解码区域）
+      zoomMode = 'css';
+      els.zoomModeTip.textContent = '数码放大';
+      applyCssZoomPreview();
     } else if (applied !== value) {
-      toast(`该摄像头最大支持 ${applied}×`);
+      zoomValue = applied;
+      updateZoomButtonsUI();
     }
   } else {
     applyCssZoomPreview();
@@ -782,5 +851,8 @@ els.btnCopyData.addEventListener('click', openCopyModal);
 if (isWeChatEnv()) {
   els.browserTip.classList.remove('hidden');
 }
+
+// 预加载解码 Worker（后台线程），首次扫码无需等待
+initDecodeWorker();
 
 renderHistory();
