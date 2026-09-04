@@ -39,6 +39,7 @@ const els = {
 };
 
 let scanning = false;      // 摄像头是否运行中
+let paused = false;       // 摄像头运行中但暂停解码（已识别待提交）
 let starting = false;      // 摄像头启动中（防止并发启动）
 let startSeq = 0;          // 启动序号：stopScan 递增以作废仍在等待中的启动请求
 let trackEndRetries = 0;  // 本次用户开启的扫码中，track 意外结束后的已重试次数
@@ -391,6 +392,7 @@ async function startScan(isRetry) {
 
   scanning = true;
   starting = false;
+  paused = false;
   autoResume = false;
   lastDecodeAt = 0;
   lastMediumAt = 0;
@@ -439,6 +441,7 @@ async function stopScan() {
     return;
   }
   scanning = false;
+  paused = false;
   cancelAnimationFrame(rafId);
   clearInterval(watchTimer);
   try {
@@ -461,12 +464,30 @@ async function stopScan() {
 }
 
 async function onScanSuccess(decodedText) {
-  if (!scanning) return;
+  if (!scanning || paused) return;
   // 识别成功震动反馈（支持的设备）
   if (navigator.vibrate) { try { navigator.vibrate(60); } catch { /* 忽略 */ } }
-  await stopScan();
-  autoResume = true; // 提交后自动继续扫码，无需再点一次
+  // 不再重启摄像头：仅暂停解码等待提交。反复开关相机在部分设备上会
+  // 触发系统相机服务竞态，导致后续启动接连失败（重试也救不回）
+  paused = true;
+  autoResume = true; // 提交后自动恢复解码，无需再点一次
   useCode(String(decodedText).trim());
+  setStatus('已识别，请在下方提交质检结果');
+}
+
+// 提交后恢复解码（摄像头一直未关，直接继续扫下一个）
+function resumeDecoding() {
+  paused = false;
+  scanStartAt = performance.now();
+  lastTipAt = 0;
+  tipIdx = 0;
+  isDark = false;
+  zoomValue = zoomPref;        // 与重新启动扫码一致的放大起点
+  zoomUserSet = zoomPref > 1;
+  applyZoomOnStart();
+  applyCssZoomPreview();
+  updateZoomButtonsUI();
+  setStatus('请将 DataMatrix 条码置于取景框内');
 }
 
 function updateScanButtons() {
@@ -508,6 +529,7 @@ function initDecodeWorker() {
 function decodeLoop(ts) {
   if (!scanning) return;
   rafId = requestAnimationFrame(decodeLoop);
+  if (paused) return; // 已识别待提交：摄像头保持运行，仅暂停解码
   if (!videoEl || videoEl.readyState < 2) return;
 
   if (decodeWorker) {
@@ -625,7 +647,7 @@ function drawCrop(canvas, ctx, crop, maxEdge) {
 
 // 周期巡检：黑屏检测 + 亮度检测 + 自动放大 + 状态提示刷新
 function scanWatch() {
-  if (!scanning) return;
+  if (!scanning || paused) return;
   // 黑屏检测：流已建立但长时间无画面（摄像头被占用或相机服务卡死）
   if (videoEl && (!videoEl.videoWidth || videoEl.readyState < 2)) {
     if (performance.now() - cameraStartAt > BLACK_SCREEN_TIMEOUT) {
@@ -838,9 +860,13 @@ function submit() {
   resetResultForm();
   if (autoResume) {
     autoResume = false;
-    // 稍作延迟，给摄像头留出足够的释放与重启时间，避免重启后黑屏
-    // （部分设备释放较慢，300ms 不够会导致下一次启动卡死）
-    setTimeout(startScan, 800);
+    if (scanning) {
+      // 摄像头一直未关闭：直接恢复解码，无重启、无竞态
+      resumeDecoding();
+    } else {
+      // 异常兜底：摄像头已不在运行（如中途被停掉），重新启动
+      setTimeout(startScan, 800);
+    }
   }
 }
 
