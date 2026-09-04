@@ -307,11 +307,13 @@ async function startScan() {
     }
   }
 
-  // 摄像头被系统或其他应用抢占（track 意外结束）时主动退出，避免黑屏挂死
+  // 摄像头被系统或其他应用抢占（track 意外结束）时主动退出，避免黑屏挂死。
+  // 注意：部分浏览器自己调用 stop() 也会异步触发 ended，且旧 track 的事件
+  // 可能在下一次扫码开始后才到达，必须校验 track 身份，避免误杀新会话
   const camTrack = getVideoTrack();
   if (camTrack) {
     camTrack.onended = () => {
-      if (!scanning) return;
+      if (!scanning || getVideoTrack() !== camTrack) return;
       toast('摄像头已被其他应用占用，请重新开始扫码', 'error');
       stopScan();
     };
@@ -374,7 +376,12 @@ async function stopScan() {
   scanning = false;
   cancelAnimationFrame(rafId);
   clearInterval(watchTimer);
-  try { if (cameraStream) cameraStream.getTracks().forEach((t) => t.stop()); } catch { /* 忽略 */ }
+  try {
+    if (cameraStream) {
+      // 主动停止前先清掉 onended，防止自己 stop() 触发的 ended 事件干扰
+      cameraStream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
+    }
+  } catch { /* 忽略 */ }
   if (videoEl) {
     try { videoEl.srcObject = null; } catch { /* 忽略 */ }
     videoEl.remove();
