@@ -39,6 +39,9 @@ const els = {
 };
 
 let scanning = false;      // 摄像头是否运行中
+let starting = false;      // 摄像头启动中（防止并发启动）
+let startSeq = 0;          // 启动序号：stopScan 递增以作废仍在等待中的启动请求
+let trackEndRetried = false; // 本次用户开启的扫码中，track 意外结束后是否已自动重试过
 let currentCode = null;    // 当前待提交的产品编号
 let selectedResult = null; // '合格' | '不合格'
 let autoResume = false;    // 提交后是否自动继续扫码
@@ -183,6 +186,7 @@ const CAMERA_START_TIMEOUT = 12000; // 摄像头启动超时：部分设备 getU
 const CAMERA_RETRY_TIMEOUT = 8000;   // 用最简约束重试摄像头时的超时
 const BLACK_SCREEN_TIMEOUT = 10000;  // 有流但一直无画面（黑屏）的判定时间
 const PLAY_TIMEOUT = 3000;           // video.play() 无画面时可能挂起，超时放行
+const TRACK_EARLY_MS = 4000;         // track 启动后多久内意外结束视为"会话切换竞态"（自动重试）
 const SCAN_TIPS = [
   '未识别到条码：请调整距离或角度',
   '小条码请置于取景框中心，保持 10–25cm 距离',
@@ -261,16 +265,22 @@ function openCamera(constraints, timeoutMs) {
   });
 }
 
-async function startScan() {
-  if (scanning) return;
+async function startScan(isRetry) {
+  if (scanning || starting) return;
+  starting = true;
+  const seq = ++startSeq;
+  // 用户主动开始时重置：允许一次 track 意外结束的自动重试
+  if (!isRetry) trackEndRetried = false;
   initDecodeWorker();
   if (!decodeWorker && !('BarcodeDetector' in window)) {
+    starting = false;
     toast('扫码组件加载失败，请检查网络，或改用手动输入', 'error');
     return;
   }
   els.readerWrap.classList.remove('hidden');
   els.reader.innerHTML = '';
   setStatus('正在启动摄像头…');
+  updateScanButtons();
   cameraStartAt = performance.now();
   // 完整约束：高分辨率 + 连续对焦（识别小码的基础）
   const fullConstraints = {
@@ -293,27 +303,48 @@ async function startScan() {
   try {
     cameraStream = await openCamera(fullConstraints, CAMERA_START_TIMEOUT);
   } catch (err) {
+    if (seq !== startSeq) { starting = false; return; } // 等待期间已被取消
     // 首次失败或超时：用最简约束重试一次（摄像头临时卡死时也常能自愈）
     setStatus('摄像头响应缓慢，正在重试…');
     try {
       cameraStream = await openCamera(simpleConstraints, CAMERA_RETRY_TIMEOUT);
     } catch (err2) {
+      starting = false;
       cameraStream = null;
       els.readerWrap.classList.add('hidden');
       els.scanStatus.classList.add('hidden');
+      updateScanButtons();
       const reason = err2 && err2.message ? err2.message : '未知错误';
       toast(`无法启动摄像头（${reason}）。请关闭其他占用摄像头的应用、锁屏后解锁再试，或改用手动输入`, 'error');
       return;
     }
   }
 
+  // 启动期间用户点了「停止」：放弃本次启动，释放刚拿到的流
+  if (seq !== startSeq) {
+    if (cameraStream) {
+      try { cameraStream.getTracks().forEach((t) => { t.onended = null; t.stop(); }); } catch { /* 忽略 */ }
+      cameraStream = null;
+    }
+    starting = false;
+    return;
+  }
+
   // 摄像头被系统或其他应用抢占（track 意外结束）时主动退出，避免黑屏挂死。
   // 注意：部分浏览器自己调用 stop() 也会异步触发 ended，且旧 track 的事件
-  // 可能在下一次扫码开始后才到达，必须校验 track 身份，避免误杀新会话
+  // 可能在下一次扫码开始后才到达，必须校验 track 身份，避免误杀新会话。
+  // 启动后短时间内结束多为上一次摄像头会话尚未释放完毕的竞态，自动重试一次
   const camTrack = getVideoTrack();
   if (camTrack) {
     camTrack.onended = () => {
       if (!scanning || getVideoTrack() !== camTrack) return;
+      if (!trackEndRetried && performance.now() - cameraStartAt < TRACK_EARLY_MS) {
+        trackEndRetried = true;
+        stopScan();
+        toast('摄像头切换中，正在自动重试…');
+        setTimeout(() => startScan(true), 600);
+        return;
+      }
       toast('摄像头已被其他应用占用，请重新开始扫码', 'error');
       stopScan();
     };
@@ -334,6 +365,7 @@ async function startScan() {
       new Promise((resolve) => setTimeout(resolve, PLAY_TIMEOUT)),
     ]);
   } catch { /* 部分浏览器自动播放限制，静默处理 */ }
+  if (seq !== startSeq) { starting = false; return; } // 等待期间已被「停止」清理
 
   // 按视频流实际宽高比固定取景容器比例，避免画面变形
   if (videoEl.videoWidth && videoEl.videoHeight) {
@@ -348,6 +380,7 @@ async function startScan() {
   }
 
   scanning = true;
+  starting = false;
   autoResume = false;
   lastDecodeAt = 0;
   lastMediumAt = 0;
@@ -372,7 +405,28 @@ async function startScan() {
 }
 
 async function stopScan() {
-  if (!scanning) return;
+  // 作废仍在等待 getUserMedia/play 的启动请求，防止取消后摄像头又自己打开
+  const wasStarting = starting;
+  startSeq++;
+  starting = false;
+  if (!scanning) {
+    if (wasStarting) {
+      // 取消启动中的会话：释放可能已拿到的流与视频元素
+      if (cameraStream) {
+        try { cameraStream.getTracks().forEach((t) => { t.onended = null; t.stop(); }); } catch { /* 忽略 */ }
+        cameraStream = null;
+      }
+      if (videoEl) {
+        try { videoEl.srcObject = null; } catch { /* 忽略 */ }
+        videoEl.remove();
+        videoEl = null;
+      }
+      els.readerWrap.classList.add('hidden');
+      els.scanStatus.classList.add('hidden');
+      updateScanButtons();
+    }
+    return;
+  }
   scanning = false;
   cancelAnimationFrame(rafId);
   clearInterval(watchTimer);
@@ -405,8 +459,10 @@ async function onScanSuccess(decodedText) {
 }
 
 function updateScanButtons() {
-  els.btnStart.classList.toggle('hidden', scanning);
-  els.btnStop.classList.toggle('hidden', !scanning);
+  // 启动中也视为"运行中"：此时显示「停止」按钮，用户可取消启动
+  const active = scanning || starting;
+  els.btnStart.classList.toggle('hidden', active);
+  els.btnStop.classList.toggle('hidden', !active);
 }
 
 /* ---------- 解码循环：取帧在主线程（轻量），解码在 Worker（不卡页面） ---------- */
@@ -922,7 +978,7 @@ els.manualForm.addEventListener('submit', (e) => {
 
 /* ---------- 事件绑定与初始化 ---------- */
 
-els.btnStart.addEventListener('click', startScan);
+els.btnStart.addEventListener('click', () => startScan());
 document.querySelectorAll('#zoom-btns .zoom-btn').forEach((btn) => {
   btn.addEventListener('click', () => setZoom(Number(btn.dataset.zoom)));
 });
