@@ -179,6 +179,10 @@ const AUTO_ZOOM_DELAY = 1200;  // 多久无识别后开始自动放大（小码�
 const AUTO_ZOOM_STEP = 1200;   // 自动放大的逐级间隔
 const AUTO_ZOOM_MAX = 5;       // 自动放大上限
 const SCAN_TIP_INTERVAL = 6000; // 识别失败时切换提示的间隔
+const CAMERA_START_TIMEOUT = 12000; // 摄像头启动超时：部分设备 getUserMedia 会长时间不返回
+const CAMERA_RETRY_TIMEOUT = 8000;   // 用最简约束重试摄像头时的超时
+const BLACK_SCREEN_TIMEOUT = 10000;  // 有流但一直无画面（黑屏）的判定时间
+const PLAY_TIMEOUT = 3000;           // video.play() 无画面时可能挂起，超时放行
 const SCAN_TIPS = [
   '未识别到条码：请调整距离或角度',
   '小条码请置于取景框中心，保持 10–25cm 距离',
@@ -209,6 +213,7 @@ let rafId = 0;              // 解码循环句柄
 let decoding = false;       // 主线程兜底解码进行中（无 Worker 时）
 let lastDecodeAt = 0;       // 上次提交解码时间戳
 let scanStartAt = 0;        // 本次扫码开始时间
+let cameraStartAt = 0;      // 摄像头启动时刻（用于黑屏检测）
 let barcodeDetector = null; // 主线程原生引擎（仅作无 Worker 时的兜底）
 let lastMediumAt = 0;       // 上次中速精扫时间戳
 let lastDeepAt = 0;         // 上次深扫时间戳
@@ -228,6 +233,34 @@ function getVideoTrack() {
   return cameraStream ? cameraStream.getVideoTracks()[0] : null;
 }
 
+// 带超时的摄像头启动：部分设备/浏览器 getUserMedia 可能长时间不返回，
+// 超时后即使稍后拿到流也立即释放，避免"正在启动摄像头"永久卡死
+function openCamera(constraints, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      reject(new Error('摄像头启动超时'));
+    }, timeoutMs);
+    navigator.mediaDevices.getUserMedia(constraints).then(
+      (stream) => {
+        if (timedOut) {
+          // 迟到的流直接释放，防止占用摄像头
+          try { stream.getTracks().forEach((t) => t.stop()); } catch { /* 忽略 */ }
+          return;
+        }
+        clearTimeout(timer);
+        resolve(stream);
+      },
+      (err) => {
+        if (timedOut) return; // 超时已处理，忽略迟到的错误
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 async function startScan() {
   if (scanning) return;
   initDecodeWorker();
@@ -238,29 +271,50 @@ async function startScan() {
   els.readerWrap.classList.remove('hidden');
   els.reader.innerHTML = '';
   setStatus('正在启动摄像头…');
+  cameraStartAt = performance.now();
+  // 完整约束：高分辨率 + 连续对焦（识别小码的基础）
+  const fullConstraints = {
+    audio: false,
+    video: {
+      facingMode: 'environment',
+      // 请求尽可能高的分辨率（不支持 4K 的设备自动回退 1080p 等）：
+      // 小条码在传感器上的像素更多，是识别小码的基础
+      width: { ideal: 3840 },
+      height: { ideal: 2160 },
+      // 请求 30fps：部分设备 4K 下会降到低帧率，低帧率画面更新慢、
+      // 自动对焦收敛也慢，ideal 30 让浏览器优先选高帧率模式
+      frameRate: { ideal: 30 },
+      // 直接在初始约束中请求连续自动对焦：远近切换时自动合焦，小码更清晰
+      advanced: [{ focusMode: 'continuous' }],
+    },
+  };
+  // 最简约束：排除"约束过重导致相机服务卡死"的情况
+  const simpleConstraints = { audio: false, video: { facingMode: 'environment' } };
   try {
-    cameraStream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        facingMode: 'environment',
-        // 请求尽可能高的分辨率（不支持 4K 的设备自动回退 1080p 等）：
-        // 小条码在传感器上的像素更多，是识别小码的基础
-        width: { ideal: 3840 },
-        height: { ideal: 2160 },
-        // 请求 30fps：部分设备 4K 下会降到低帧率，低帧率画面更新慢、
-        // 自动对焦收敛也慢，ideal 30 让浏览器优先选高帧率模式
-        frameRate: { ideal: 30 },
-        // 直接在初始约束中请求连续自动对焦：远近切换时自动合焦，小码更清晰
-        advanced: [{ focusMode: 'continuous' }],
-      },
-    });
+    cameraStream = await openCamera(fullConstraints, CAMERA_START_TIMEOUT);
   } catch (err) {
-    cameraStream = null;
-    els.readerWrap.classList.add('hidden');
-    els.scanStatus.classList.add('hidden');
-    const reason = err && err.message ? err.message : '未知错误';
-    toast(`无法启动摄像头（${reason}），可改用手动输入`, 'error');
-    return;
+    // 首次失败或超时：用最简约束重试一次（摄像头临时卡死时也常能自愈）
+    setStatus('摄像头响应缓慢，正在重试…');
+    try {
+      cameraStream = await openCamera(simpleConstraints, CAMERA_RETRY_TIMEOUT);
+    } catch (err2) {
+      cameraStream = null;
+      els.readerWrap.classList.add('hidden');
+      els.scanStatus.classList.add('hidden');
+      const reason = err2 && err2.message ? err2.message : '未知错误';
+      toast(`无法启动摄像头（${reason}）。请关闭其他占用摄像头的应用、锁屏后解锁再试，或改用手动输入`, 'error');
+      return;
+    }
+  }
+
+  // 摄像头被系统或其他应用抢占（track 意外结束）时主动退出，避免黑屏挂死
+  const camTrack = getVideoTrack();
+  if (camTrack) {
+    camTrack.onended = () => {
+      if (!scanning) return;
+      toast('摄像头已被其他应用占用，请重新开始扫码', 'error');
+      stopScan();
+    };
   }
 
   videoEl = document.createElement('video');
@@ -271,7 +325,13 @@ async function startScan() {
   videoEl.autoplay = true;
   videoEl.srcObject = cameraStream;
   els.reader.appendChild(videoEl);
-  try { await videoEl.play(); } catch { /* 部分浏览器自动播放限制，静默处理 */ }
+  try {
+    // 无画面时 play() 的 Promise 可能一直挂起，超时后放行交给黑屏检测处理
+    await Promise.race([
+      videoEl.play(),
+      new Promise((resolve) => setTimeout(resolve, PLAY_TIMEOUT)),
+    ]);
+  } catch { /* 部分浏览器自动播放限制，静默处理 */ }
 
   // 按视频流实际宽高比固定取景容器比例，避免画面变形
   if (videoEl.videoWidth && videoEl.videoHeight) {
@@ -489,9 +549,16 @@ function drawCrop(canvas, ctx, crop, maxEdge) {
 
 /* ---------- 扫码实时反馈与自动放大 ---------- */
 
-// 周期巡检：亮度检测 + 自动放大 + 状态提示刷新
+// 周期巡检：黑屏检测 + 亮度检测 + 自动放大 + 状态提示刷新
 function scanWatch() {
   if (!scanning) return;
+  // 黑屏检测：流已建立但长时间无画面（摄像头被占用或相机服务卡死）
+  if (videoEl && (!videoEl.videoWidth || videoEl.readyState < 2)) {
+    if (performance.now() - cameraStartAt > BLACK_SCREEN_TIMEOUT) {
+      setStatus('摄像头无画面：可能被其他应用占用或相机服务卡死，请关闭后台相机应用（如微信扫一扫）、锁屏解锁后，点「停止扫码」再重试', 'error');
+    }
+    return;
+  }
   checkBrightness();
   autoZoomTick();
   refreshScanStatus();
@@ -697,8 +764,9 @@ function submit() {
   resetResultForm();
   if (autoResume) {
     autoResume = false;
-    // 稍作延迟，给摄像头留出释放与重启的时间，避免重启后黑屏
-    setTimeout(startScan, 300);
+    // 稍作延迟，给摄像头留出足够的释放与重启时间，避免重启后黑屏
+    // （部分设备释放较慢，300ms 不够会导致下一次启动卡死）
+    setTimeout(startScan, 800);
   }
 }
 
