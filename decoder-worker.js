@@ -3,9 +3,7 @@
 /* 扫码解码 Worker（仅 DataMatrix）：在后台线程运行 BarcodeDetector / ZXing，
    避免解码阻塞页面主线程 */
 
-// ZXing 库本地化（libs/zxing.min.js，与 Worker 同源），不再依赖 jsDelivr CDN，
-// 避免大陆夜间 CDN 链路抖动导致无法解码
-const ZXING_URL = 'libs/zxing.min.js?v=1';
+const ZXING_CDN = 'https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js';
 const DETECT_TIMEOUT = 2000; // detect 挂起保护（无 GMS 设备可能构造成功但调用挂起）
 
 let detector = null;
@@ -20,7 +18,7 @@ let zxingReader = null;
 let zxingHints = null;
 let GrayLuminanceSource = null; // 灰度图适配器（Worker 内无 DOM，无法用 canvas 版）
 try {
-  importScripts(ZXING_URL);
+  importScripts(ZXING_CDN);
   if (typeof ZXing !== 'undefined') {
     class GraySource extends ZXing.LuminanceSource {
       constructor(width, height, gray) {

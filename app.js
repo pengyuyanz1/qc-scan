@@ -167,7 +167,7 @@ function openCopyModal() {
 /* 解码引擎参数 */
 const JOB_INTERVAL = 50;       // 提交解码任务的最小间隔（Worker 空闲即提交）
 const FALLBACK_INTERVAL = 220; // 无 Worker 时主线程解码限频（避免卡顿）
-const WORKER_URL = 'decoder-worker.js?v=5';
+const WORKER_URL = 'decoder-worker.js?v=4';
 const FAST_MAX_EDGE = 640;     // 快速扫描画布长边：全帧降采样，先解大码
 const MEDIUM_INTERVAL = 350;   // 中速全帧扫最小间隔（覆盖偏离中心的较大条码）
 const MEDIUM_MAX_EDGE = 1280;  // 中速精扫画布长边：全帧较高分辨率
@@ -185,10 +185,6 @@ const SCAN_TIPS = [
   '可点按下方「放大」辅助识别小条码',
   '请检查条码是否清晰、无反光遮挡',
 ];
-const NO_FRAME_LIMIT = 4000;   // 画面持续无帧超过此时长判定为黑屏（含启动宽限）
-const MAX_AUTO_RESTART = 2;    // 断流/黑屏自动重启次数上限，超过后提示手动处理
-const STARTUP_TIMEOUT = 12000; // 启动看门狗：卡在"正在启动摄像头…"超过此时长，放弃本次尝试并重试
-const PLAY_TIMEOUT = 3000;     // video.play() 超时兜底（个别浏览器 play() 会永久挂起）
 
 /* 解码用离屏画布 */
 const fastCanvas = document.createElement('canvas');
@@ -221,10 +217,6 @@ let watchTimer = 0;         // 亮度/自动放大/状态提示定时器
 let isDark = false;         // 画面是否偏暗
 let lastTipAt = 0;          // 上次切换提示的时间
 let tipIdx = 0;             // 提示轮换索引
-let noFrameSince = 0;       // 画面无帧起始时间（0 表示有帧）
-let restartCount = 0;       // 断流/黑屏自动重启已用次数（出帧后归零）
-let scanAttempt = 0;        // 当前扫码启动尝试编号（用于作废挂起的旧尝试）
-let startupTimer = 0;       // 启动看门狗定时器句柄
 
 function setStatus(text, type = '') {
   els.scanStatus.textContent = text;
@@ -246,64 +238,40 @@ async function startScan() {
   els.readerWrap.classList.remove('hidden');
   els.reader.innerHTML = '';
   setStatus('正在启动摄像头…');
-  // 启动看门狗：摄像头服务异常或被其他应用占用时，getUserMedia 可能既不成功
-  // 也不报错地永久挂起（表现即"正在启动摄像头…"黑屏）。超时后放弃本次尝试并自动重试
-  const attempt = ++scanAttempt;
-  clearTimeout(startupTimer);
-  startupTimer = setTimeout(() => onStartupTimeout(attempt), STARTUP_TIMEOUT);
-  let stream = null;
   try {
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          facingMode: 'environment',
-          // 请求尽可能高的分辨率（不支持 4K 的设备自动回退 1080p 等）：
-          // 小条码在传感器上的像素更多，是识别小码的基础
-          width: { ideal: 3840 },
-          height: { ideal: 2160 },
-          // 请求 30fps：部分设备 4K 下会降到低帧率，低帧率画面更新慢、
-          // 自动对焦收敛也慢，ideal 30 让浏览器优先选高帧率模式
-          frameRate: { ideal: 30 },
-          // 直接在初始约束中请求连续自动对焦：远近切换时自动合焦，小码更清晰
-          advanced: [{ focusMode: 'continuous' }],
-        },
-      });
-    } catch (err) {
-      if (attempt !== scanAttempt) return; // 旧尝试已被看门狗作废，勿覆盖新尝试的状态
-      cameraStream = null;
-      els.readerWrap.classList.add('hidden');
-      els.scanStatus.classList.add('hidden');
-      const reason = err && err.message ? err.message : '未知错误';
-      toast(`无法启动摄像头（${reason}），可改用手动输入`, 'error');
-      return;
-    }
-    if (attempt !== scanAttempt) { releaseStream(stream); return; }
-    cameraStream = stream;
-
-    // 摄像头流被系统断开（后台挂起被回收、其他应用抢占等）时立即感知，避免无声黑屏
-    const track = getVideoTrack();
-    if (track) {
-      track.addEventListener('ended', () => { if (scanning) handleStreamDead('摄像头流已断开'); });
-    }
-
-    videoEl = document.createElement('video');
-    videoEl.setAttribute('playsinline', '');
-    videoEl.setAttribute('webkit-playsinline', '');
-    videoEl.playsInline = true;
-    videoEl.muted = true;
-    videoEl.autoplay = true;
-    videoEl.srcObject = cameraStream;
-    els.reader.appendChild(videoEl);
-    // play 加超时竞速：个别浏览器 play() 会永久挂起，卡死整个启动流程
-    try {
-      await Promise.race([videoEl.play(), new Promise((r) => setTimeout(r, PLAY_TIMEOUT))]);
-    } catch { /* 部分浏览器自动播放限制，静默处理 */ }
-    if (attempt !== scanAttempt) { releaseStream(stream); return; }
-  } finally {
-    // 本次尝试未被作废：启动流程已结束（含失败退出），解除看门狗
-    if (attempt === scanAttempt) clearTimeout(startupTimer);
+    cameraStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: 'environment',
+        // 请求尽可能高的分辨率（不支持 4K 的设备自动回退 1080p 等）：
+        // 小条码在传感器上的像素更多，是识别小码的基础
+        width: { ideal: 3840 },
+        height: { ideal: 2160 },
+        // 请求 30fps：部分设备 4K 下会降到低帧率，低帧率画面更新慢、
+        // 自动对焦收敛也慢，ideal 30 让浏览器优先选高帧率模式
+        frameRate: { ideal: 30 },
+        // 直接在初始约束中请求连续自动对焦：远近切换时自动合焦，小码更清晰
+        advanced: [{ focusMode: 'continuous' }],
+      },
+    });
+  } catch (err) {
+    cameraStream = null;
+    els.readerWrap.classList.add('hidden');
+    els.scanStatus.classList.add('hidden');
+    const reason = err && err.message ? err.message : '未知错误';
+    toast(`无法启动摄像头（${reason}），可改用手动输入`, 'error');
+    return;
   }
+
+  videoEl = document.createElement('video');
+  videoEl.setAttribute('playsinline', '');
+  videoEl.setAttribute('webkit-playsinline', '');
+  videoEl.playsInline = true;
+  videoEl.muted = true;
+  videoEl.autoplay = true;
+  videoEl.srcObject = cameraStream;
+  els.reader.appendChild(videoEl);
+  try { await videoEl.play(); } catch { /* 部分浏览器自动播放限制，静默处理 */ }
 
   // 按视频流实际宽高比固定取景容器比例，避免画面变形
   if (videoEl.videoWidth && videoEl.videoHeight) {
@@ -331,7 +299,6 @@ async function startScan() {
   lastTipAt = 0;
   tipIdx = 0;
   isDark = false;
-  noFrameSince = 0;
   updateScanButtons();
   initZoomSupport();
   applyZoomOnStart();
@@ -522,84 +489,12 @@ function drawCrop(canvas, ctx, crop, maxEdge) {
 
 /* ---------- 扫码实时反馈与自动放大 ---------- */
 
-// 周期巡检：流健康 + 亮度检测 + 自动放大 + 状态提示刷新
+// 周期巡检：亮度检测 + 自动放大 + 状态提示刷新
 function scanWatch() {
   if (!scanning) return;
-  checkStreamHealth();
-  if (!scanning) return; // 断流处理可能已停止扫码
   checkBrightness();
   autoZoomTick();
   refreshScanStatus();
-}
-
-/* ---------- 摄像头流健康检测：断流/黑屏自动恢复 ---------- */
-
-// 检测摄像头流是否存活、画面是否正常出帧；异常时自动重启（有限次）
-function checkStreamHealth() {
-  if (!videoEl) return;
-  const track = getVideoTrack();
-  if (!track || track.readyState === 'ended') {
-    handleStreamDead('摄像头流已断开');
-    return;
-  }
-  // 播放被暂停（自动播放限制、页面从后台恢复等）：静默尝试恢复播放
-  if (videoEl.paused && videoEl.readyState >= 2) {
-    videoEl.play().catch(() => { /* 忽略 */ });
-  }
-  const hasFrame = videoEl.readyState >= 2 && videoEl.videoWidth > 0;
-  if (hasFrame) {
-    noFrameSince = 0;
-    restartCount = 0; // 画面正常，重置自动重启配额
-    return;
-  }
-  // 持续无帧（含启动阶段）：超过阈值判定为黑屏
-  if (!noFrameSince) {
-    noFrameSince = performance.now();
-  } else if (performance.now() - noFrameSince > NO_FRAME_LIMIT) {
-    handleStreamDead('摄像头无画面');
-  }
-}
-
-// 停止当前扫码并自动重启摄像头；超过次数上限则提示手动处理
-async function handleStreamDead(reason) {
-  if (!scanning) return;
-  await stopScan();
-  if (restartCount >= MAX_AUTO_RESTART) {
-    restartCount = 0;
-    toast(`${reason}，自动恢复失败。请关闭其他占用摄像头的应用（如微信）后重新点「开始扫码」，仍黑屏可下拉刷新页面重试`, 'error');
-    return;
-  }
-  restartCount++;
-  toast(`检测到${reason}，正在自动恢复摄像头…`);
-  setTimeout(startScan, 600);
-}
-
-// 停止指定媒体流（防泄漏通用小工具）
-function releaseStream(stream) {
-  try { if (stream) stream.getTracks().forEach((t) => t.stop()); } catch { /* 忽略 */ }
-}
-
-// 启动看门狗触发：当前尝试卡在"正在启动摄像头…"超过 STARTUP_TIMEOUT 仍无结果——清理并重试
-function onStartupTimeout(attempt) {
-  if (scanning || attempt !== scanAttempt) return;
-  scanAttempt++; // 作废当前尝试：挂起的旧调用之后若返回，会被上面的编号检查忽略
-  releaseStream(cameraStream);
-  cameraStream = null;
-  if (videoEl) {
-    try { videoEl.srcObject = null; } catch { /* 忽略 */ }
-    videoEl.remove();
-    videoEl = null;
-  }
-  els.readerWrap.classList.add('hidden');
-  els.scanStatus.classList.add('hidden');
-  if (restartCount < MAX_AUTO_RESTART) {
-    restartCount++;
-    toast('摄像头启动无响应，正在自动重试…');
-    setTimeout(startScan, 600);
-  } else {
-    restartCount = 0;
-    toast('摄像头反复启动失败，请关闭占用摄像头的后台应用（如微信）后重试，或下拉刷新页面', 'error');
-  }
 }
 
 function checkBrightness() {
@@ -641,10 +536,6 @@ async function autoZoomTick() {
 function refreshScanStatus() {
   if (!scanning) return;
   const now = performance.now();
-  if (noFrameSince) {
-    setStatus('正在等待摄像头画面…');
-    return;
-  }
   if (isDark) {
     setStatus('光线偏暗，请增加光照或调整角度', 'warn');
     return;
