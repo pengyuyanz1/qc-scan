@@ -23,6 +23,7 @@ const els = {
   btnPass: $('btn-pass'),
   btnFail: $('btn-fail'),
   btnSubmit: $('btn-submit'),
+  btnDiscard: $('btn-discard'),
   stats: $('stats'),
   tbody: $('record-tbody'),
   btnExport: $('btn-export'),
@@ -1040,6 +1041,17 @@ els.btnStop.addEventListener('click', () => {
 els.btnPass.addEventListener('click', () => selectResult('合格'));
 els.btnFail.addEventListener('click', () => selectResult('不合格'));
 els.btnSubmit.addEventListener('click', submit);
+// 放弃当前已识别的编号（不提交），直接继续扫下一个码
+els.btnDiscard.addEventListener('click', () => {
+  resetResultForm();
+  autoResume = false;
+  if (scanning && paused) {
+    resumeDecoding(); // 摄像头未关，直接恢复解码与取景界面
+  } else if (!scanning) {
+    // 摄像头已关（如手动输入后的场景）：清空表单即可，需要扫码时点「开始扫码」
+    toast('已放弃本条');
+  }
+});
 els.btnExport.addEventListener('click', exportExcel);
 els.btnClear.addEventListener('click', clearAll);
 els.btnCopyCsv.addEventListener('click', copyCsvText);

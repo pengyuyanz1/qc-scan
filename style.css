@@ -252,6 +252,7 @@ main.container { padding-bottom: 48px; }
   font-size: 13px;
 }
 .choice { display: flex; gap: 12px; margin: 14px 0; }
+#btn-discard { margin-top: 10px; }
 .choice-btn {
   flex: 1;
   padding: 14px 0;
