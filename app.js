@@ -1032,6 +1032,35 @@ els.btnCopyCsv.addEventListener('click', copyCsvText);
 els.btnCloseCsv.addEventListener('click', () => els.csvModal.classList.add('hidden'));
 els.btnCopyData.addEventListener('click', openCopyModal);
 
+/* ---------- 页面后台切换的摄像头释放与恢复 ---------- */
+
+// 切到后台（如打开系统相机、切到微信）时，浏览器会冻结/收回页面占用的摄像头，
+// 切回来后画面会定住在最后一帧。这里在后台时主动释放摄像头，回到前台时自动
+// 重新打开，并恢复到离开前的状态（扫码中 / 已识别待提交）
+let pendingResumeOnVisible = null; // 离开页面时的扫码状态：'scan' | 'paused' | null
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (scanning && !starting) {
+      pendingResumeOnVisible = paused ? 'paused' : 'scan';
+      stopScan(); // 后台期间主动释放摄像头，避免画面冻结与抢占冲突
+    }
+    return;
+  }
+  const pending = pendingResumeOnVisible;
+  pendingResumeOnVisible = null;
+  if (!pending || scanning || starting) return;
+  (async () => {
+    await startScan();
+    if (pending === 'paused') {
+      // 恢复到"已识别待提交"状态：摄像头开着但不解码，等待用户提交
+      paused = true;
+      autoResume = true; // startScan 会重置此标志，提交后需恢复解码
+      setStatus('已识别，请在下方提交质检结果');
+    }
+  })();
+});
+
 // 微信/企业微信环境提示：建议用浏览器打开以获得完整功能
 if (isWeChatEnv()) {
   els.browserTip.classList.remove('hidden');
