@@ -467,17 +467,31 @@ async function onScanSuccess(decodedText) {
   if (!scanning || paused) return;
   // 识别成功震动反馈（支持的设备）
   if (navigator.vibrate) { try { navigator.vibrate(60); } catch { /* 忽略 */ } }
-  // 不再重启摄像头：仅暂停解码等待提交。反复开关相机在部分设备上会
-  // 触发系统相机服务竞态，导致后续启动接连失败（重试也救不回）
+  // 摄像头底层保持常开（反复开关相机在部分设备上会触发系统相机服务竞态），
+  // 但界面上收起取景框：用户感知与"扫码已停止"一致，提交后自动继续
   paused = true;
   autoResume = true; // 提交后自动恢复解码，无需再点一次
   useCode(String(decodedText).trim());
-  setStatus('已识别，请在下方提交质检结果');
+  enterPausedUI();
+}
+
+// 暂停扫码的界面表现：收起取景框/放大面板/状态栏（摄像头实际未关闭）
+function enterPausedUI() {
+  els.readerWrap.classList.add('hidden');
+  els.zoomPanel.classList.add('hidden');
+  els.scanStatus.classList.add('hidden');
+}
+
+// 结束暂停：重新展开取景框等扫码界面
+function exitPausedUI() {
+  els.readerWrap.classList.remove('hidden');
+  els.zoomPanel.classList.remove('hidden');
 }
 
 // 提交后恢复解码（摄像头一直未关，直接继续扫下一个）
 function resumeDecoding() {
   paused = false;
+  exitPausedUI();
   scanStartAt = performance.now();
   lastTipAt = 0;
   tipIdx = 0;
@@ -1053,10 +1067,10 @@ document.addEventListener('visibilitychange', () => {
   (async () => {
     await startScan();
     if (pending === 'paused') {
-      // 恢复到"已识别待提交"状态：摄像头开着但不解码，等待用户提交
+      // 恢复到"已识别待提交"状态：摄像头开着但不解码，界面保持收起取景框
       paused = true;
       autoResume = true; // startScan 会重置此标志，提交后需恢复解码
-      setStatus('已识别，请在下方提交质检结果');
+      enterPausedUI();
     }
   })();
 });
