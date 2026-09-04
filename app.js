@@ -41,7 +41,8 @@ const els = {
 let scanning = false;      // 摄像头是否运行中
 let starting = false;      // 摄像头启动中（防止并发启动）
 let startSeq = 0;          // 启动序号：stopScan 递增以作废仍在等待中的启动请求
-let trackEndRetried = false; // 本次用户开启的扫码中，track 意外结束后是否已自动重试过
+let trackEndRetries = 0;  // 本次用户开启的扫码中，track 意外结束后的已重试次数
+let camStopAt = 0;        // 上次停止摄像头的时刻（用于重开冷却）
 let currentCode = null;    // 当前待提交的产品编号
 let selectedResult = null; // '合格' | '不合格'
 let autoResume = false;    // 提交后是否自动继续扫码
@@ -98,6 +99,8 @@ function updateStorageWarning() {
 /* ---------- 工具 ---------- */
 
 function pad(n) { return String(n).padStart(2, '0'); }
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function formatTime(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
@@ -187,6 +190,8 @@ const CAMERA_RETRY_TIMEOUT = 8000;   // 用最简约束重试摄像头时的超�
 const BLACK_SCREEN_TIMEOUT = 10000;  // 有流但一直无画面（黑屏）的判定时间
 const PLAY_TIMEOUT = 3000;           // video.play() 无画面时可能挂起，超时放行
 const TRACK_EARLY_MS = 4000;         // track 启动后多久内意外结束视为"会话切换竞态"（自动重试）
+const TRACK_END_MAX_RETRY = 3;      // track 意外结束的自动重试次数上限
+const CAM_REOPEN_COOLDOWN = 700;    // 停止后重新打开摄像头的最小间隔（释放是异步的）
 const SCAN_TIPS = [
   '未识别到条码：请调整距离或角度',
   '小条码请置于取景框中心，保持 10–25cm 距离',
@@ -269,8 +274,8 @@ async function startScan(isRetry) {
   if (scanning || starting) return;
   starting = true;
   const seq = ++startSeq;
-  // 用户主动开始时重置：允许一次 track 意外结束的自动重试
-  if (!isRetry) trackEndRetried = false;
+  // 用户主动开始时重置 track 意外结束的重试配额
+  if (!isRetry) trackEndRetries = 0;
   initDecodeWorker();
   if (!decodeWorker && !('BarcodeDetector' in window)) {
     starting = false;
@@ -281,6 +286,10 @@ async function startScan(isRetry) {
   els.reader.innerHTML = '';
   setStatus('正在启动摄像头…');
   updateScanButtons();
+  // 摄像头释放是异步的：距上次停止太近就先等待，避免相机服务竞态掐死新 track
+  const cooldown = CAM_REOPEN_COOLDOWN - (performance.now() - camStopAt);
+  if (cooldown > 0) await sleep(cooldown);
+  if (seq !== startSeq) { starting = false; return; } // 等待期间已被「停止」取消
   cameraStartAt = performance.now();
   // 完整约束：高分辨率 + 连续对焦（识别小码的基础）
   const fullConstraints = {
@@ -338,14 +347,15 @@ async function startScan(isRetry) {
   if (camTrack) {
     camTrack.onended = () => {
       if (!scanning || getVideoTrack() !== camTrack) return;
-      if (!trackEndRetried && performance.now() - cameraStartAt < TRACK_EARLY_MS) {
-        trackEndRetried = true;
+      if (trackEndRetries < TRACK_END_MAX_RETRY && performance.now() - cameraStartAt < TRACK_EARLY_MS) {
+        trackEndRetries++;
         stopScan();
-        toast('摄像头切换中，正在自动重试…');
-        setTimeout(() => startScan(true), 600);
+        toast(`摄像头切换中，正在自动重试（${trackEndRetries}/${TRACK_END_MAX_RETRY}）…`);
+        // 递增退避：给系统留出足够的相机释放时间
+        setTimeout(() => startScan(true), 600 * trackEndRetries);
         return;
       }
-      toast('摄像头已被其他应用占用，请重新开始扫码', 'error');
+      toast('摄像头多次启动失败，请稍等几秒后重试；若持续失败，请关闭其他相机类应用后重试', 'error');
       stopScan();
     };
   }
@@ -409,6 +419,7 @@ async function stopScan() {
   const wasStarting = starting;
   startSeq++;
   starting = false;
+  camStopAt = performance.now(); // 记录停止时刻：重开摄像头前需冷却等待
   if (!scanning) {
     if (wasStarting) {
       // 取消启动中的会话：释放可能已拿到的流与视频元素
