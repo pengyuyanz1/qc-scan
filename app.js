@@ -836,6 +836,10 @@ function useCode(code) {
   } else {
     els.overrideTip.classList.add('hidden');
   }
+}
+
+// 仅手动输入时滚动到结果卡片（扫码成功后不滚动，保持页面位置）
+function scrollResultIntoView() {
   els.resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
@@ -1026,6 +1030,7 @@ els.manualForm.addEventListener('submit', (e) => {
   autoResume = false;
   if (scanning) stopScan();
   useCode(value);
+  scrollResultIntoView();
 });
 
 /* ---------- 事件绑定与初始化 ---------- */
