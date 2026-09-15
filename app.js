@@ -134,6 +134,19 @@ function toast(msg, type = 'info') {
   toastTimer = setTimeout(() => els.toast.classList.remove('show'), 2200);
 }
 
+// 关闭弹窗：先播放退场动画（CSS 的 .closing），动画结束后再真正隐藏
+function hideModal(modal) {
+  if (modal.classList.contains('hidden')) return;
+  modal.classList.add('closing');
+  setTimeout(() => {
+    // 若动画期间弹窗被重新打开（closing 已被清掉），则不再隐藏
+    if (modal.classList.contains('closing')) {
+      modal.classList.remove('closing');
+      modal.classList.add('hidden');
+    }
+  }, 300);
+}
+
 /* ---------- 微信环境检测与导出兜底 ---------- */
 
 const UA = navigator.userAgent || '';
@@ -199,6 +212,7 @@ function openCopyModal() {
   els.csvModalTip.textContent = isWeChatEnv()
     ? '微信内能否下载文件视设备而定（苹果手机一般可正常下载）。若「导出 Excel」没有反应，可使用此复制方式：复制后粘贴发送到电脑（如文件传输助手），保存为 .csv 文件即可用 Excel 打开。'
     : '复制后可粘贴到电脑或其他设备：粘贴到记事本另存为 .csv 文件可用 Excel 打开，也可直接粘贴到 Excel 表格中使用。';
+  els.csvModal.classList.remove('closing');
   els.csvModal.classList.remove('hidden');
 }
 
@@ -946,12 +960,13 @@ function openFailEntry() {
     snapshot: idx >= 0 ? { index: idx, record: records[idx] } : null, // 取消时恢复用
   };
   els.btnFail.classList.add('active');
+  els.failModal.classList.remove('closing');
   els.failModal.classList.remove('hidden');
   showRegionStep();
 }
 
 function closeFailEntry() {
-  els.failModal.classList.add('hidden');
+  hideModal(els.failModal);
   els.btnFail.classList.remove('active');
   failEntry = null;
 }
@@ -1334,7 +1349,14 @@ els.btnDiscard.addEventListener('click', () => {
 els.btnExport.addEventListener('click', exportExcel);
 els.btnClear.addEventListener('click', clearAll);
 els.btnCopyCsv.addEventListener('click', copyCsvText);
-els.btnCloseCsv.addEventListener('click', () => els.csvModal.classList.add('hidden'));
+els.btnCloseCsv.addEventListener('click', () => hideModal(els.csvModal));
+// 点击遮罩空白处也可关闭弹窗（点弹窗内部不触发）
+els.csvModal.addEventListener('click', (e) => {
+  if (e.target === els.csvModal) hideModal(els.csvModal);
+});
+els.failModal.addEventListener('click', (e) => {
+  if (e.target === els.failModal) cancelFailEntry();
+});
 els.btnCopyData.addEventListener('click', openCopyModal);
 
 /* ---------- 页面后台切换的摄像头释放与恢复 ---------- */
