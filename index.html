@@ -3,12 +3,19 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <meta name="theme-color" content="#4f46e5" />
+  <meta name="theme-color" content="#e8558f" />
   <title>QC 扫码质检</title>
-  <link rel="stylesheet" href="style.css?v=11" />
+  <link rel="stylesheet" href="style.css?v=13" />
 </head>
 <body>
   <header class="app-header">
+    <div class="header-deco" aria-hidden="true">
+      <span class="blob b1"></span>
+      <span class="blob b2"></span>
+      <span class="blob b3"></span>
+      <span class="heart h1">♡</span>
+      <span class="heart h2">♡</span>
+    </div>
     <div class="container">
       <h1>QC 扫码质检</h1>
       <p>扫码 · 判定 · 提交 · 导出 Excel</p>
@@ -47,11 +54,11 @@
         <span class="zoom-mode-tip" id="zoom-mode-tip"></span>
       </div>
       <div class="scan-actions">
-        <button id="btn-start" class="btn btn-primary" type="button">开始扫码</button>
+        <button id="btn-start" class="btn btn-primary" type="button">✿ 开始扫码</button>
         <button id="btn-stop" class="btn btn-ghost hidden" type="button">停止扫码</button>
       </div>
       <form id="manual-form" class="manual-form hidden">
-        <input id="manual-input" type="text" placeholder="请输入产品编号" autocomplete="off" />
+        <input id="manual-input" type="text" placeholder="请输入产品编号，回车确认" autocomplete="off" />
         <button type="submit" class="btn btn-ghost">确定</button>
       </form>
       <p class="tip">扫码需要摄像头权限，请在 HTTPS 或 localhost 环境下使用；摄像头不可用时可手动输入编号。仅支持 DataMatrix 条码，全画面识别，条码无需占满取景框；条码很小时请置于取景框中心、保持 10–25cm 距离，识别慢时会自动放大辅助。</p>
@@ -62,7 +69,7 @@
       <div class="card-head">
         <h2>② 质检判定</h2>
       </div>
-      <p class="empty-tip" id="empty-tip">扫描或输入产品编号后，在此选择质检结果</p>
+      <p class="empty-tip" id="empty-tip">✿ 扫描或输入产品编号后，在此选择质检结果 ✿</p>
       <div id="result-body" class="hidden">
         <div class="code-box">
           <span class="code-label">产品编号</span>
@@ -70,8 +77,8 @@
         </div>
         <p class="override-tip hidden" id="override-tip"></p>
         <div class="choice">
-          <button class="choice-btn pass" id="btn-pass" type="button">合格</button>
-          <button class="choice-btn fail" id="btn-fail" type="button">不合格</button>
+          <button class="choice-btn pass" id="btn-pass" type="button">♡ 合格</button>
+          <button class="choice-btn fail" id="btn-fail" type="button">✕ 不合格</button>
         </div>
         <button class="btn btn-primary btn-block" id="btn-submit" type="button" disabled>确认提交</button>
         <button class="btn btn-ghost btn-block" id="btn-discard" type="button">放弃本条，继续扫码</button>
@@ -118,9 +125,36 @@
     </div>
   </div>
 
+  <div class="modal-mask hidden" id="fail-modal">
+    <div class="modal">
+      <!-- 步骤一：区域选择 -->
+      <div id="fail-step-region">
+        <h3>不合格 · 选择缺陷区域</h3>
+        <p class="fail-code-line">产品编号：<span class="fail-code-text" id="fail-code-region"></span></p>
+        <div class="region-grid" id="region-grid"></div>
+        <p class="region-hint hidden" id="region-hint">请先选择一个区域，再进入缺陷记录</p>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" id="btn-region-cancel" type="button">取消</button>
+          <button class="btn btn-success" id="btn-region-done" type="button" title="结束该产品的录入">完成</button>
+          <button class="btn btn-primary" id="btn-region-next" type="button" disabled>下一步</button>
+        </div>
+      </div>
+      <!-- 步骤二：缺陷明细录入 -->
+      <div id="fail-step-defect" class="hidden">
+        <h3 id="defect-region-title">区域缺陷记录</h3>
+        <p class="fail-code-line">产品编号：<span class="fail-code-text" id="fail-code-defect"></span></p>
+        <div class="defect-rows" id="defect-rows"></div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" id="btn-defect-back" type="button">返回重选区域</button>
+          <button class="btn btn-primary" id="btn-defect-save" type="button">保存</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-  <script src="app.js?v=19"></script>
+  <script src="app.js?v=20"></script>
 </body>
 </html>

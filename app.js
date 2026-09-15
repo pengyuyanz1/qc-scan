@@ -2,6 +2,10 @@
 
 const STORAGE_KEY = 'qc-scan-records';
 
+/* 不合格缺陷记录：8 个区域 × 7 档粒径数量 */
+const REGION_COUNT = 8;
+const DEFECT_BINS = ['＜30um', '30-50um', '50-100um', '100-150um', '150-200um', '200-250um', '250-300um'];
+
 const $ = (id) => document.getElementById(id);
 
 const els = {
@@ -24,6 +28,20 @@ const els = {
   btnFail: $('btn-fail'),
   btnSubmit: $('btn-submit'),
   btnDiscard: $('btn-discard'),
+  failModal: $('fail-modal'),
+  failStepRegion: $('fail-step-region'),
+  failStepDefect: $('fail-step-defect'),
+  failCodeRegion: $('fail-code-region'),
+  failCodeDefect: $('fail-code-defect'),
+  regionGrid: $('region-grid'),
+  regionHint: $('region-hint'),
+  btnRegionCancel: $('btn-region-cancel'),
+  btnRegionDone: $('btn-region-done'),
+  btnRegionNext: $('btn-region-next'),
+  defectRegionTitle: $('defect-region-title'),
+  defectRows: $('defect-rows'),
+  btnDefectBack: $('btn-defect-back'),
+  btnDefectSave: $('btn-defect-save'),
   stats: $('stats'),
   tbody: $('record-tbody'),
   btnExport: $('btn-export'),
@@ -131,9 +149,23 @@ function csvEscape(v) {
 }
 
 function recordsToCsv(records) {
-  const rows = [['产品编号', '质检结果', '首次扫码时间', '最近提交时间']];
+  // 合格：一行一条；不合格：每个已录入区域一行（含 7 档缺陷数量），与 Excel 两个 sheet 的数据一致
+  const rows = [['产品编号', '质检结果', '区域', ...DEFECT_BINS, '首次扫码时间', '最近提交时间']];
   for (const r of records) {
-    rows.push([r.code, r.result, r.scanTime, r.updateTime]);
+    if (r.result === '不合格') {
+      const regions = Object.keys(r.defects || {}).map(Number).sort((a, b) => a - b);
+      if (!regions.length) regions.push(0); // 旧数据无缺陷明细：仅输出一行
+      for (const region of regions) {
+        const counts = region ? r.defects[region] : null;
+        rows.push([
+          r.code, r.result, region ? `区域${region}` : '',
+          ...DEFECT_BINS.map((_, k) => (counts ? counts[k] : '')),
+          r.scanTime, r.updateTime,
+        ]);
+      }
+    } else {
+      rows.push([r.code, r.result, '', ...DEFECT_BINS.map(() => ''), r.scanTime, r.updateTime]);
+    }
   }
   // 前置 BOM，保证用 Excel 打开 csv 时中文不乱码
   return '\uFEFF' + rows.map((row) => row.map(csvEscape).join(',')).join('\r\n');
@@ -897,6 +929,199 @@ function resetResultForm() {
   els.overrideTip.classList.add('hidden');
 }
 
+/* ---------- 不合格录入：区域选择 → 缺陷明细 ---------- */
+
+let failEntry = null; // 当前不合格录入会话
+
+function openFailEntry() {
+  if (!currentCode) return;
+  const records = loadRecords();
+  const idx = records.findIndex((r) => r.code === currentCode);
+  failEntry = {
+    code: currentCode,
+    selected: null,     // 当前选中的区域（1~8）
+    counts: null,        // 正在编辑的 7 档数量
+    saved: {},           // 本次会话已保存的区域 { 区域号: [7 档数量] }
+    persisted: false,    // 是否已写入存储（首区域保存时整体覆盖该产品旧记录）
+    snapshot: idx >= 0 ? { index: idx, record: records[idx] } : null, // 取消时恢复用
+  };
+  els.btnFail.classList.add('active');
+  els.failModal.classList.remove('hidden');
+  showRegionStep();
+}
+
+function closeFailEntry() {
+  els.failModal.classList.add('hidden');
+  els.btnFail.classList.remove('active');
+  failEntry = null;
+}
+
+function showRegionStep() {
+  if (!failEntry) return;
+  els.failStepDefect.classList.add('hidden');
+  els.failStepRegion.classList.remove('hidden');
+  els.failCodeRegion.textContent = failEntry.code;
+  renderRegionGrid();
+}
+
+function renderRegionGrid() {
+  const grid = els.regionGrid;
+  grid.innerHTML = '';
+  for (let region = 1; region <= REGION_COUNT; region++) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'region-btn' + (failEntry.selected === region ? ' active' : '');
+    const name = document.createElement('span');
+    name.className = 'region-name';
+    name.textContent = `区域${region}`;
+    btn.appendChild(name);
+    if (failEntry.saved[region]) {
+      const total = failEntry.saved[region].reduce((a, b) => a + b, 0);
+      const badge = document.createElement('span');
+      badge.className = 'region-badge' + (total > 0 ? ' has-data' : '');
+      badge.textContent = total > 0 ? `已录 ${total}` : '已录';
+      btn.appendChild(badge);
+    }
+    btn.addEventListener('click', () => {
+      failEntry.selected = region;
+      renderRegionGrid();
+    });
+    grid.appendChild(btn);
+  }
+  // 未选区域时不允许进入下一步：禁用按钮并给出提示
+  const hasSelection = failEntry.selected != null;
+  els.btnRegionNext.disabled = !hasSelection;
+  els.regionHint.classList.toggle('hidden', hasSelection);
+}
+
+function showDefectStep() {
+  if (!failEntry || !failEntry.selected) return;
+  els.defectRegionTitle.textContent = `区域${failEntry.selected} 缺陷记录`;
+  els.failCodeDefect.textContent = failEntry.code;
+  els.failStepRegion.classList.add('hidden');
+  els.failStepDefect.classList.remove('hidden');
+  renderDefectRows();
+}
+
+function renderDefectRows() {
+  const region = failEntry.selected;
+  // 已保存过的区域回填原值，可修改后重新保存覆盖
+  failEntry.counts = failEntry.saved[region]
+    ? failEntry.saved[region].slice()
+    : DEFECT_BINS.map(() => 0);
+  els.defectRows.innerHTML = '';
+  DEFECT_BINS.forEach((label, i) => {
+    const row = document.createElement('div');
+    row.className = 'defect-row';
+
+    const name = document.createElement('span');
+    name.className = 'defect-label';
+    name.textContent = label;
+    row.appendChild(name);
+
+    const stepper = document.createElement('div');
+    stepper.className = 'defect-stepper';
+
+    const minus = document.createElement('button');
+    minus.type = 'button';
+    minus.className = 'step-btn';
+    minus.textContent = '−';
+    const value = document.createElement('span');
+    value.className = 'defect-count';
+    const plus = document.createElement('button');
+    plus.type = 'button';
+    plus.className = 'step-btn plus';
+    plus.textContent = '+';
+
+    const refresh = () => {
+      value.textContent = failEntry.counts[i];
+      minus.disabled = failEntry.counts[i] <= 0; // 数量不允许为负数
+    };
+    minus.addEventListener('click', () => {
+      if (failEntry.counts[i] > 0) failEntry.counts[i]--;
+      refresh();
+    });
+    plus.addEventListener('click', () => {
+      failEntry.counts[i]++;
+      refresh();
+    });
+
+    stepper.appendChild(minus);
+    stepper.appendChild(value);
+    stepper.appendChild(plus);
+    row.appendChild(stepper);
+    els.defectRows.appendChild(row);
+    refresh();
+  });
+}
+
+function saveRegionDefects() {
+  if (!failEntry || !failEntry.selected || !failEntry.counts) return;
+  const region = failEntry.selected;
+  const counts = failEntry.counts.slice();
+  const now = formatTime(new Date());
+  const records = loadRecords();
+  let rec = records.find((r) => r.code === failEntry.code);
+  if (!rec || !failEntry.persisted) {
+    // 本会话首次保存：整体覆盖该产品的旧记录（与合格分支覆盖语义一致，保留首次扫码时间）
+    if (rec) records.splice(records.indexOf(rec), 1);
+    rec = {
+      code: failEntry.code,
+      result: '不合格',
+      scanTime: failEntry.snapshot ? failEntry.snapshot.record.scanTime : now,
+      updateTime: now,
+      defects: {},
+    };
+    records.unshift(rec);
+    failEntry.persisted = true;
+  }
+  rec.defects[region] = counts;
+  rec.updateTime = now;
+  if (!saveRecords(records)) return; // 保存失败时留在当前界面，清理后可重试
+  failEntry.saved[region] = counts;
+  renderHistory();
+  toast(`区域${region} 缺陷记录已保存`, 'success');
+  failEntry.selected = null;
+  failEntry.counts = null;
+  showRegionStep();
+}
+
+function completeFailEntry() {
+  if (!failEntry) return;
+  const savedCount = Object.keys(failEntry.saved).length;
+  if (!savedCount && !window.confirm('尚未录入任何缺陷区域，确定结束该产品的不合格录入吗？')) return;
+  closeFailEntry();
+  if (savedCount) toast('该产品的不合格记录已完成', 'success');
+  resetResultForm();
+  if (autoResume) {
+    autoResume = false;
+    if (scanning) {
+      resumeDecoding();
+    } else {
+      setTimeout(startScan, 800);
+    }
+  }
+}
+
+function cancelFailEntry() {
+  if (!failEntry) return;
+  const savedCount = Object.keys(failEntry.saved).length;
+  if (savedCount && !window.confirm(`本次已保存 ${savedCount} 个区域的缺陷记录，取消将删除这些记录并恢复原状。确定取消吗？`)) return;
+  if (failEntry.persisted) {
+    // 回滚：删除本次新建的记录，恢复录入前的原记录
+    const records = loadRecords();
+    const idx = records.findIndex((r) => r.code === failEntry.code);
+    if (idx >= 0) records.splice(idx, 1);
+    if (failEntry.snapshot) {
+      records.splice(Math.min(failEntry.snapshot.index, records.length), 0, failEntry.snapshot.record);
+    }
+    saveRecords(records);
+    renderHistory();
+  }
+  closeFailEntry();
+  toast(savedCount ? '已取消本次不合格录入' : '已取消');
+}
+
 /* ---------- 记录列表 ---------- */
 
 function renderHistory() {
@@ -992,16 +1217,60 @@ function exportExcel() {
     toast('Excel 组件加载失败，请检查网络后重试', 'error');
     return;
   }
-  const data = records.map((r) => ({
-    '产品编号': r.code,
-    '质检结果': r.result,
-    '首次扫码时间': r.scanTime,
-    '最近提交时间': r.updateTime,
-  }));
-  const ws = XLSX.utils.json_to_sheet(data);
-  ws['!cols'] = [{ wch: 34 }, { wch: 10 }, { wch: 20 }, { wch: 20 }];
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, '质检记录');
+
+  // Sheet「合格」：沿用原格式，一行一条
+  const passRows = [['产品编号', '质检结果', '首次扫码时间', '最近提交时间']];
+  for (const r of records) {
+    if (r.result !== '合格') continue;
+    passRows.push([r.code, r.result, r.scanTime, r.updateTime]);
+  }
+  const wsPass = XLSX.utils.aoa_to_sheet(passRows);
+  wsPass['!cols'] = [{ wch: 34 }, { wch: 10 }, { wch: 20 }, { wch: 20 }];
+  XLSX.utils.book_append_sheet(wb, wsPass, '合格');
+
+  // Sheet「不合格」：按汇总模板，每产品 8 行区域 + 1 行 SUM，序号/产品纵向合并
+  const failRecords = records.filter((r) => r.result === '不合格').reverse(); // 旧→新，序号递增
+  const failRows = [['序号', '产品', '区域', ...DEFECT_BINS]];
+  const merges = [];
+  const sumRows = []; // 每个 SUM 行：{ row: 0 基行号, totals: 各档合计 }
+  failRecords.forEach((r, i) => {
+    const first = failRows.length; // 该产品首行（0 基行号）
+    const binTotals = DEFECT_BINS.map((_, k) => {
+      let s = 0;
+      for (let region = 1; region <= REGION_COUNT; region++) {
+        s += (r.defects && r.defects[region] && r.defects[region][k]) || 0;
+      }
+      return s;
+    });
+    for (let region = 1; region <= REGION_COUNT; region++) {
+      const counts = (r.defects && r.defects[region]) || [];
+      failRows.push([
+        region === 1 ? i + 1 : null,
+        region === 1 ? r.code : null,
+        `区域${region}`,
+        ...DEFECT_BINS.map((_, k) => counts[k] || null), // 0 与未录入按模板留空
+      ]);
+    }
+    sumRows.push({ row: failRows.length, totals: binTotals });
+    failRows.push([null, null, 'SUM', ...DEFECT_BINS.map(() => null)]);
+    merges.push({ s: { r: first, c: 0 }, e: { r: first + REGION_COUNT, c: 0 } });
+    merges.push({ s: { r: first, c: 1 }, e: { r: first + REGION_COUNT, c: 1 } });
+  });
+  const wsFail = XLSX.utils.aoa_to_sheet(failRows);
+  // SUM 行写入 =SUM(列{首行}:列{末行}) 公式（附缓存值，Excel 打开自动重算）
+  for (const { row, totals } of sumRows) {
+    const excelRow = row + 1;
+    const first = excelRow - REGION_COUNT;
+    DEFECT_BINS.forEach((_, k) => {
+      const col = XLSX.utils.encode_col(3 + k);
+      wsFail[`${col}${excelRow}`] = { t: 'n', f: `SUM(${col}${first}:${col}${excelRow - 1})`, v: totals[k] };
+    });
+  }
+  wsFail['!merges'] = merges;
+  wsFail['!cols'] = [{ wch: 6 }, { wch: 36 }, { wch: 8 }, ...DEFECT_BINS.map(() => ({ wch: 12 }))];
+  XLSX.utils.book_append_sheet(wb, wsFail, '不合格');
+
   const d = new Date();
   const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_` +
                 `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
@@ -1044,8 +1313,13 @@ els.btnStop.addEventListener('click', () => {
   stopScan();
 });
 els.btnPass.addEventListener('click', () => selectResult('合格'));
-els.btnFail.addEventListener('click', () => selectResult('不合格'));
+els.btnFail.addEventListener('click', openFailEntry);
 els.btnSubmit.addEventListener('click', submit);
+els.btnRegionCancel.addEventListener('click', cancelFailEntry);
+els.btnRegionDone.addEventListener('click', completeFailEntry);
+els.btnRegionNext.addEventListener('click', showDefectStep);
+els.btnDefectBack.addEventListener('click', showRegionStep);
+els.btnDefectSave.addEventListener('click', saveRegionDefects);
 // 放弃当前已识别的编号（不提交），直接继续扫下一个码
 els.btnDiscard.addEventListener('click', () => {
   resetResultForm();
