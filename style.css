@@ -48,33 +48,46 @@ body {
 
 .container { max-width: 680px; margin: 0 auto; padding: 0 16px; }
 
-/* ---------- 头部 ---------- */
+/* ---------- 头部：美乐蒂房间场景横幅 ---------- */
 .app-header {
   position: relative;
-  background: linear-gradient(120deg, #ff9ec4 0%, #f56fa4 48%, #b794f6 100%);
-  color: #fff;
-  padding: 26px 0 30px;
+  /* 场景图：窗口取图中下部（美乐蒂与房间家具），避开顶部标题与底部版权字 */
+  background: #fbd3e3 url("assets/melody-room.jpeg") center 68% / cover no-repeat;
+  color: #a63d6f;
+  padding: 30px 0 34px;
   border-radius: 0 0 30px 30px;
   box-shadow: 0 10px 28px rgba(245, 111, 164, .35);
   overflow: hidden;
+}
+/* 白粉柔化遮罩：让场景图与页面色调融合，同时保证标题可读 */
+.app-header::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: linear-gradient(180deg,
+    rgba(255, 241, 247, .75) 0%,
+    rgba(255, 241, 247, .28) 45%,
+    rgba(255, 224, 237, .55) 100%);
 }
 .app-header .container { position: relative; z-index: 2; }
 .app-header h1 {
   margin: 0;
   font-size: 24px;
   letter-spacing: 1.5px;
-  text-shadow: 0 2px 10px rgba(169, 45, 100, .35);
+  color: #a63d6f;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, .65);
 }
 .app-header h1::before { content: "✿ "; font-size: 20px; }
 .app-header h1::after { content: " ✿"; font-size: 20px; }
-.app-header p { margin: 6px 0 0; font-size: 13px; opacity: .92; letter-spacing: .5px; }
+.app-header p { margin: 6px 0 0; font-size: 13px; color: #9d5a78; letter-spacing: .5px; }
 
 /* 头部漂浮装饰（纯视觉） */
 .header-deco { position: absolute; inset: 0; z-index: 1; pointer-events: none; }
 .header-deco .blob {
   position: absolute;
   border-radius: 50%;
-  background: rgba(255, 255, 255, .16);
+  background: rgba(255, 255, 255, .38);
   animation: floaty 6s ease-in-out infinite;
 }
 .header-deco .b1 { width: 90px; height: 90px; top: -30px; left: 6%; }
@@ -82,7 +95,7 @@ body {
 .header-deco .b3 { width: 24px; height: 24px; top: 18px; right: 22%; animation-delay: -4s; }
 .header-deco .heart {
   position: absolute;
-  color: rgba(255, 255, 255, .5);
+  color: rgba(255, 255, 255, .8);
   animation: floaty 5s ease-in-out infinite;
 }
 .header-deco .h1 { font-size: 18px; top: 24%; right: 8%; animation-delay: -1s; }
@@ -93,7 +106,7 @@ body {
 }
 
 /* ---------- 卡片 ---------- */
-main.container { padding-bottom: 56px; }
+main.container { padding-bottom: 8px; }
 .card {
   background: var(--card);
   border: 2px solid #ffe1ec;
@@ -578,6 +591,36 @@ main.container { padding-bottom: 56px; }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .toast.success { background: linear-gradient(135deg, #3dc488, #2fae76); }
 .toast.error { background: linear-gradient(135deg, #f56b8d, #e13a68); }
+
+/* ---------- 页脚贴纸（美乐蒂吉祥物） ---------- */
+.page-footer {
+  text-align: center;
+  padding: 26px 16px 34px;
+}
+/* 正方形取竖图正中主体：蕾丝爱心 + 花帽美乐蒂，
+   自动裁掉顶部 "My Melody" 标题与底部版权字 */
+.mascot {
+  width: min(60vw, 230px);
+  aspect-ratio: 1 / 1;
+  margin: 0 auto;
+  border-radius: 26px;
+  background: #ffe3ee url("assets/melody-flower.png") center 50% / cover no-repeat;
+  box-shadow:
+    0 12px 28px rgba(232, 85, 143, .28),
+    0 0 0 6px #fff,
+    0 0 0 8px #ffc2da;
+  animation: sway 5.5s ease-in-out infinite;
+}
+@keyframes sway {
+  0%, 100% { transform: rotate(-2deg); }
+  50% { transform: rotate(2deg) translateY(-5px); }
+}
+.footer-note {
+  margin: 16px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  letter-spacing: .5px;
+}
 
 /* ---------- 不合格录入弹窗 ---------- */
 #fail-step-region,
